@@ -1,0 +1,11 @@
+node_modules/
+dist/
+release/
+.env
+*.log
+.DS_Store
+
+# Exclude large archives and backups
+Oscar.zip
+*- Copy*
+debug_keys.txt

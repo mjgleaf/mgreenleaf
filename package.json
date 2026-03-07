@@ -1,0 +1,57 @@
+{
+  "name": "oscar-dashboard",
+  "private": true,
+  "version": "1.0.0",
+  "main": "src/main/main.js",
+  "description": "Professional reporting and live data dashboard for T24 load cells.",
+  "author": "Antigravity",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on tcp:5173 && node launch-electron.js\"",
+    "electron:build": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.oscar.dashboard",
+    "productName": "OSCAR Dashboard",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "src/main/**/*",
+      "public/**/*"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "public/icon.png"
+    }
+  },
+  "dependencies": {
+    "@azure/msal-node": "^1.18.4",
+    "axios": "^1.13.3",
+    "chart.js": "^4.4.1",
+    "docxtemplater": "^3.67.6",
+    "dotenv": "^17.2.3",
+    "node-hid": "^3.2.0",
+    "openai": "^6.16.0",
+    "papaparse": "^5.4.1",
+    "pizzip": "^3.2.0",
+    "react": "^18.2.0",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.2.0",
+    "recharts": "^3.7.0",
+    "xlsx-js-style": "^1.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.43",
+    "@types/react-dom": "^18.2.17",
+    "@vitejs/plugin-react": "^4.2.1",
+    "concurrently": "^8.2.2",
+    "electron": "^40.7.0",
+    "electron-builder": "^26.4.0",
+    "vite": "^5.0.8",
+    "wait-on": "^7.2.0"
+  }
+}
