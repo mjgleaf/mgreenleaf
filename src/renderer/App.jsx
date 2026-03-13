@@ -69,7 +69,7 @@ class ErrorBoundary extends React.Component {
     }
 }
 
-const processChartData = (data, serialLabels = [], displayUnit = 'lbs') => {
+const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayTimeUnit = 'min', inputTimeUnit = null) => {
     if (!data || data.length === 0) return null;
 
     try {
@@ -116,8 +116,19 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs') => {
             headers[0];
 
         const isMs = /ms|millisecond/i.test(timeKey);
+        const isMin = !isMs && /min/i.test(timeKey);
+        const isHrs = !isMs && !isMin && /hour/i.test(timeKey);
 
-        const times = data.map(d => timeToSec(d[timeKey]));
+        const times = data.map(d => {
+            const val = timeToSec(d[timeKey]);
+            // If explicit input unit is provided, use it; otherwise fall back to header detection
+            const unit = inputTimeUnit || (isMs ? 'ms' : (isMin ? 'min' : (isHrs ? 'hrs' : 'sec')));
+
+            if (unit === 'ms') return val / 1000;
+            if (unit === 'min') return val * 60;
+            if (unit === 'hrs') return val * 3600;
+            return val; // assumed seconds
+        });
 
         // Unit Conversion: Tonnes to LBS
         const getValInLbs = (row, key) => {
@@ -165,30 +176,29 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs') => {
             }
         }
 
-        // 4. Duration calculation (Always force to minutes for "Duration (min)" field)
+        // 4. Duration calculation
         const minVal = times.length > 0 ? Math.min(...times) : 0;
         const maxVal = times.length > 0 ? Math.max(...times) : 0;
-        let totalTime = maxVal - minVal;
+        let totalTimeSec = maxVal - minVal;
 
-        if (isMs) {
-            totalTime = totalTime / 60000;
-        } else {
-            // If it's in seconds, convert to minutes
-            totalTime = totalTime / 60;
+        // Convert based on requested display unit
+        let totalTimeVal = totalTimeSec / 60; // default to min
+        if (displayTimeUnit === 'hrs') {
+            totalTimeVal = totalTimeSec / 3600;
         }
 
         const unitFactor = displayUnit === 'tons' ? 1 / 2000 : 1;
 
         return {
             maxWeight: maxWeight * unitFactor,
-            totalTime: totalTime || 0,
+            totalTime: totalTimeVal || 0,
             peakTime: peakTime || '',
             timeKey,
             weightKey: weightKeys[0], // Primary key for reference
             chartData: {
-                labels: times.map(t => {
-                    const min = isMs ? t / 60000 : t / 60;
-                    return min.toFixed(2);
+                labels: times.map(seconds => {
+                    const val = displayTimeUnit === 'hrs' ? seconds / 3600 : seconds / 60;
+                    return val.toFixed(2);
                 }),
                 datasets: weightKeys.map((key, i) => {
                     const palette = ['#1a3a6c', '#3fb950', '#2188ff', '#f85149', '#dbab09', '#8957e5'];
@@ -1478,7 +1488,7 @@ function ImportView({ onDataImported, contextJob }) {
     );
 }
 
-function ReportView({ job, displayUnit = 'lbs', onUnitChange, onAddData, onRemoveDataSet, onUpdateDataSet }) {
+function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitChange, onTimeUnitChange, onAddData, onRemoveDataSet, onUpdateDataSet }) {
     if (!job || !job.dataSets || job.dataSets.length === 0) {
         return (
             <div className="placeholder-card">
@@ -1506,7 +1516,7 @@ function ReportView({ job, displayUnit = 'lbs', onUnitChange, onAddData, onRemov
                     ➕ Add More Data
                 </button>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center', background: 'var(--bg-card)', padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--border)' }}>
-                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Unit:</span>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Weight:</span>
                     <select
                         value={displayUnit}
                         onChange={e => onUnitChange(e.target.value)}
@@ -1516,11 +1526,22 @@ function ReportView({ job, displayUnit = 'lbs', onUnitChange, onAddData, onRemov
                         <option value="tons">tons</option>
                     </select>
                 </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', background: 'var(--bg-card)', padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Time:</span>
+                    <select
+                        value={displayTimeUnit}
+                        onChange={e => onTimeUnitChange(e.target.value)}
+                        style={{ background: 'var(--bg-dark)', border: '1px solid var(--border)', color: 'var(--yellow-accent)', padding: '2px 8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                    >
+                        <option value="min">min</option>
+                        <option value="hrs">hrs</option>
+                    </select>
+                </div>
             </div>
 
             <div className="datasets-scroll-area" style={{ display: 'flex', flexDirection: 'column', gap: '40px' }}>
                 {job.dataSets.map((dataSet, index) => {
-                    const stats = processChartData(dataSet.data, [], displayUnit);
+                    const stats = processChartData(dataSet.data, [], displayUnit, displayTimeUnit, dataSet.inputTimeUnit);
                     if (!stats) return <div key={index}>Error processing data set {index + 1}</div>;
 
                     return (
@@ -1536,14 +1557,29 @@ function ReportView({ job, displayUnit = 'lbs', onUnitChange, onAddData, onRemov
                                             placeholder="Graph Title..."
                                         />
                                     </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.7rem' }}>Y-Axis Label:</span>
-                                        <input
-                                            value={dataSet.yAxisLabel || ''}
-                                            onChange={(e) => onUpdateDataSet(index, { yAxisLabel: e.target.value })}
-                                            style={{ background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)', color: 'var(--text-secondary)', fontSize: '0.8rem', width: '200px' }}
-                                            placeholder={`Default: Weight (${displayUnit})`}
-                                        />
+                                    <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.7rem' }}>Y-Axis Label:</span>
+                                            <input
+                                                value={dataSet.yAxisLabel || ''}
+                                                onChange={(e) => onUpdateDataSet(index, { yAxisLabel: e.target.value })}
+                                                style={{ background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)', color: 'var(--text-secondary)', fontSize: '0.8rem', width: '150px' }}
+                                                placeholder={`Default: Weight (${displayUnit})`}
+                                            />
+                                        </div>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.7rem' }}>Source Time Unit:</span>
+                                            <select
+                                                value={dataSet.inputTimeUnit || 'sec'}
+                                                onChange={(e) => onUpdateDataSet(index, { inputTimeUnit: e.target.value })}
+                                                style={{ background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)', color: 'var(--yellow-accent)', fontSize: '0.8rem', cursor: 'pointer' }}
+                                            >
+                                                <option value="sec" style={{ background: 'var(--bg-dark)' }}>Seconds</option>
+                                                <option value="min" style={{ background: 'var(--bg-dark)' }}>Minutes</option>
+                                                <option value="hrs" style={{ background: 'var(--bg-dark)' }}>Hours</option>
+                                                <option value="ms" style={{ background: 'var(--bg-dark)' }}>Milliseconds</option>
+                                            </select>
+                                        </div>
                                     </div>
                                 </div>
                                 <div style={{ display: 'flex', gap: '10px' }}>
@@ -1563,7 +1599,7 @@ function ReportView({ job, displayUnit = 'lbs', onUnitChange, onAddData, onRemov
                                 </div>
                                 <div className="stat-card">
                                     <h3>Total Duration</h3>
-                                    <div className="stat-value">{stats.totalTime.toFixed(2)} min</div>
+                                    <div className="stat-value">{stats.totalTime.toFixed(2)} {displayTimeUnit}</div>
                                 </div>
                                 <div className="stat-card">
                                     <h3>Peak Timestamp</h3>
@@ -2894,6 +2930,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [showRecoveryPrompt, setShowRecoveryPrompt] = useState(false);
     const [isCertPreview, setIsCertPreview] = useState(false);
     const [displayUnit, setDisplayUnit] = useState('lbs');
+    const [displayTimeUnit, setDisplayTimeUnit] = useState('min');
 
     // --- Lifted Live Telemetry & Logging State ---
     const [devices, setDevices] = useState({}); // tag -> latest packet
@@ -3314,7 +3351,9 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         <ReportView
                             job={activeJob}
                             displayUnit={displayUnit}
+                            displayTimeUnit={displayTimeUnit}
                             onUnitChange={setDisplayUnit}
+                            onTimeUnitChange={setDisplayTimeUnit}
                             onAddData={() => triggerAppendData(activeJob)}
                             onRemoveDataSet={(idx) => handleRemoveDataSet(activeJob.id, idx)}
                             onUpdateDataSet={(idx, updates) => handleUpdateDataSet(activeJob.id, idx, updates)}
