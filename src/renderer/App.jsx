@@ -69,20 +69,18 @@ class ErrorBoundary extends React.Component {
     }
 }
 
-const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayTimeUnit = 'min', inputTimeUnit = null) => {
+const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayTimeUnit = 'min', inputTimeUnit = null, xUnit = 'min') => {
     if (!data || data.length === 0) return null;
 
     try {
         const headers = Object.keys(data[0]);
 
-        // Helper for numeric values (handles commas)
         const parseNum = (v) => {
             if (typeof v === 'number') return v;
             if (!v) return 0;
             return parseFloat(v.toString().replace(/,/g, '')) || 0;
         };
 
-        // Helper for time strings to seconds
         const timeToSec = (v) => {
             if (!v) return 0;
             const s = v.toString().trim();
@@ -93,24 +91,16 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
             return parseNum(v);
         };
 
-        // 1. Identify Weight Columns
         let weightKeys = headers.filter(h => /pounds|lbs|weight|load|force/i.test(h));
-
-        // CRITICAL FIX: If we have both a "Total" column and individual channel/hook columns,
-        // we must exclude the "Total" to prevent double-counting when we sum them up later.
         if (weightKeys.length > 1) {
             const hasTotal = weightKeys.some(h => /total/i.test(h));
             const hasIndividual = weightKeys.some(h => /hook|cell|channel|tag|pounds|lbs/i.test(h) && !/total/i.test(h));
-
             if (hasTotal && hasIndividual) {
-                // Prefer individual channels for granular graphing, exclude the aggregate "Total" column
                 weightKeys = weightKeys.filter(h => !/total/i.test(h));
             }
         }
-
         if (weightKeys.length === 0) weightKeys.push(headers[1] || headers[0]);
 
-        // 2. Identify Time Column (for graph X-axis / duration)
         const timeKey = headers.find(h => /elapsed|second/i.test(h)) ||
             headers.find(h => /time|stamp/i.test(h)) ||
             headers[0];
@@ -134,40 +124,46 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
         const getValInLbs = (row, key) => {
             const raw = parseNum(row[key]);
             const header = key.toLowerCase();
-            // Metric Tonne / MT: 1000kg = 2204.6 lbs
             if (header.includes('tonne') || header.includes('mt')) return raw * 2204.6;
-            // Short Ton: 2000 lbs
             if (header.includes('ton')) return raw * 2000;
             return raw;
         };
 
-        const totalLoads = data.map(d => weightKeys.reduce((sum, key) => sum + getValInLbs(d, key), 0));
+        // 1. Sort data chronologically to prevent X-axis jitter
+        const sortedData = [...data].sort((a, b) => timeToSec(a[timeKey]) - timeToSec(b[timeKey]));
+
+        // 2. Filter out single-point zero drops (glitches)
+        const filteredData = sortedData.filter((d, i, arr) => {
+            const currentWeight = weightKeys.reduce((sum, key) => sum + getValInLbs(d, key), 0);
+            if (currentWeight === 0 && i > 0 && i < arr.length - 1) {
+                const prevWeight = weightKeys.reduce((sum, key) => sum + getValInLbs(arr[i - 1], key), 0);
+                const nextWeight = weightKeys.reduce((sum, key) => sum + getValInLbs(arr[i + 1], key), 0);
+                // If it drops to 0 but was > 500 lbs before and after, it's a glitch
+                if (prevWeight > 500 && nextWeight > 500) return false;
+            }
+            return true;
+        });
+
+        const times = filteredData.map(d => timeToSec(d[timeKey]));
+        const totalLoads = filteredData.map(d => weightKeys.reduce((sum, key) => sum + getValInLbs(d, key), 0));
 
         const maxWeight = totalLoads.length > 0 ? Math.max(...totalLoads) : 0;
         const maxIndex = totalLoads.indexOf(maxWeight);
-        const maxRow = data[maxIndex === -1 ? 0 : maxIndex];
+        const maxRow = filteredData[maxIndex === -1 ? 0 : maxIndex];
 
-        // 3. Peak Time detection (for certificate)
         let peakTime = '';
         if (maxRow) {
             const allValues = Object.entries(maxRow);
-
-            // Priority 1: Values containing colons or dots that look like HH:MM or HH.MM
-            const timeVal = allValues.find(([k, v]) =>
-                v && typeof v === 'string' && /(\d{1,2}[:.]\d{2})/.test(v)
-            );
-
+            const timeVal = allValues.find(([k, v]) => v && typeof v === 'string' && /(\d{1,2}[:.]\d{2})/.test(v));
             if (timeVal) {
                 const match = timeVal[1].match(/(\d{1,2}[:.]\d{2})/);
-                peakTime = match[1].replace('.', ':'); // Standardize to colon
+                peakTime = match[1].replace('.', ':');
             } else if (maxRow.timestamp) {
                 peakTime = new Date(maxRow.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
             } else {
-                // Priority 2: Check any column that has "time", "clock", or "clock" in the header
                 const tHeader = headers.find(h => /time|clock|hour|recorded/i.test(h));
                 if (tHeader && maxRow[tHeader]) {
                     const val = maxRow[tHeader].toString().trim();
-                    // Grab first 5 chars if it looks like HH:MM or HH.MM or HHMM
                     peakTime = val.match(/(\d{1,2}[:.]?\d{2})/)?.[1] || val.slice(0, 5);
                     if (peakTime.length === 4 && !peakTime.includes(':')) {
                         peakTime = peakTime.slice(0, 2) + ':' + peakTime.slice(2);
@@ -188,13 +184,14 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
         }
 
         const unitFactor = displayUnit === 'tons' ? 1 / 2000 : 1;
+        const timeFactor = xUnit === 'hour' ? 1 / 60 : 1;
 
         return {
             maxWeight: maxWeight * unitFactor,
             totalTime: totalTimeVal || 0,
             peakTime: peakTime || '',
             timeKey,
-            weightKey: weightKeys[0], // Primary key for reference
+            weightKey: weightKeys[0],
             chartData: {
                 labels: times.map(seconds => {
                     const val = displayTimeUnit === 'hrs' ? seconds / 3600 : seconds / 60;
@@ -205,7 +202,7 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
                     const customLabel = serialLabels[i] ? serialLabels[i].trim() : `Hook ${i + 1}`;
                     return {
                         label: customLabel,
-                        data: data.map(d => getValInLbs(d, key) * unitFactor),
+                        data: filteredData.map(d => getValInLbs(d, key) * unitFactor),
                         borderColor: palette[i % palette.length],
                         backgroundColor: i === 0 ? 'rgba(26, 58, 108, 0.1)' : 'transparent',
                         fill: i === 0 && weightKeys.length === 1,
@@ -508,7 +505,7 @@ function CompanyInfoView({ company, onBack, onSelectForLive, onImportCsv }) {
     );
 }
 
-function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lbs', onUnitChange }) {
+function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChange }) {
     const [viewMode, setViewMode] = useState('auto'); // 'auto' or 'fixed'
     const [fixedDuration, setFixedDuration] = useState(120); // minutes (2 hours default)
     const [yZoom, setYZoom] = useState([0, 'auto']);
@@ -555,17 +552,19 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
         const bucketSize = 250; // ms grouping
 
         const unitFactor = displayUnit === 'tons' ? 1 / 2000 : 1;
+        const timeFactor = xUnit === 'hour' ? 1 / 3600000 : 1 / 60000; // elapsed is in ms, converting to min or hr
+
         data.forEach(point => {
             const time = Math.floor(point["Elapsed (ms)"] / bucketSize) * bucketSize;
             if (!currentBucket || currentBucket.elapsed !== time) {
-                currentBucket = { elapsed: time / 1000 }; // converting to seconds for display
+                currentBucket = { elapsed: (point["Elapsed (ms)"] * timeFactor) };
                 grouped.push(currentBucket);
             }
             currentBucket[point.Tag] = point.value * unitFactor;
         });
 
         return grouped;
-    }, [data, displayUnit]);
+    }, [data, displayUnit, xUnit]);
 
     return (
         <div className="live-graph-container" style={{ background: 'var(--bg-card)', padding: '20px', borderRadius: '10px', border: '1px solid var(--border)', marginTop: '20px' }}>
@@ -590,6 +589,16 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
                     </div>
                     <div style={{ display: 'flex', gap: '8px', alignItems: 'center', borderRight: '1px solid var(--border)', paddingRight: '15px' }}>
                         <select
+                            value={xUnit}
+                            onChange={e => onXUnitChange && onXUnitChange(e.target.value)}
+                            style={{ background: 'var(--bg-dark)', border: '1px solid var(--border)', color: 'var(--yellow-accent)', padding: '2px 5px', fontWeight: 'bold' }}
+                        >
+                            <option value="min">Minutes</option>
+                            <option value="hour">Hours</option>
+                        </select>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', borderRight: '1px solid var(--border)', paddingRight: '15px' }}>
+                        <select
                             value={viewMode}
                             onChange={e => setViewMode(e.target.value)}
                             style={{ background: 'var(--bg-dark)', border: '1px solid var(--border)', color: 'white', padding: '2px 5px' }}
@@ -599,7 +608,7 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
                         </select>
                         {viewMode === 'fixed' && (
                             <>
-                                <span>Duration (min):</span>
+                                <span>Duration ({xUnit}):</span>
                                 <input type="number" value={fixedDuration} onChange={e => setFixedDuration(parseInt(e.target.value) || 1)} style={{ width: '50px', background: 'var(--bg-dark)', border: '1px solid var(--border)', color: 'white', padding: '2px 5px' }} />
                             </>
                         )}
@@ -624,9 +633,10 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
                         <XAxis
                             dataKey="elapsed"
                             type="number"
-                            domain={viewMode === 'fixed' ? [0, fixedDuration * 60] : ['auto', 'auto']}
+                            domain={viewMode === 'fixed' ? [0, fixedDuration] : ['auto', 'auto']}
                             stroke="var(--text-secondary)"
-                            label={{ value: 'Time (s)', position: 'insideBottom', offset: -5, fill: 'var(--text-secondary)' }}
+                            label={{ value: `Time (${xUnit})`, position: 'insideBottom', offset: -5, fill: 'var(--text-secondary)' }}
+                            tickFormatter={(v) => v.toFixed(2)}
                         />
                         <YAxis
                             domain={viewMode === 'fixed' ? [0, Math.max(parseFloat(targetLoad) || 0, parseFloat(wll) || 0) * 1.1 || 'auto'] : yZoom}
@@ -637,6 +647,7 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
                             contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                             itemStyle={{ fontSize: '0.8rem' }}
                             formatter={(value) => [typeof value === 'number' ? value.toFixed(displayUnit === 'tons' ? 3 : 2) : value, `Load (${displayUnit})`]}
+                            labelFormatter={(label) => `Time: ${label.toFixed(2)} ${xUnit}`}
                         />
                         <ReLegend />
 
@@ -670,7 +681,7 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
                                 isAnimationActive={false} // Disable for real-time performance
                             />
                         ))}
-                        {viewMode === 'auto' && chartData.length > 2 && <Brush dataKey="elapsed" height={30} stroke="var(--accent-hover)" fill="var(--bg-dark)" />}
+                        {viewMode === 'auto' && chartData.length > 2 && <Brush dataKey="elapsed" height={30} stroke="var(--accent-hover)" fill="var(--bg-dark)" tickFormatter={(v) => v.toFixed(2)} />}
                     </LineChart>
                 </ResponsiveContainer>
             </div>
@@ -1057,7 +1068,9 @@ function LiveView({
     previewData,
     setPreviewData,
     displayUnit,
-    onUnitChange
+    onUnitChange,
+    xUnit,
+    onXUnitChange
 }) {
     const [showJobPrompt, setShowJobPrompt] = useState(false);
     const [jobInput, setJobInput] = useState('');
@@ -1390,6 +1403,8 @@ function LiveView({
                     jobNumber={jobInput || selectedJob?.QuoteNum}
                     displayUnit={displayUnit}
                     onUnitChange={onUnitChange}
+                    xUnit={xUnit}
+                    onXUnitChange={onXUnitChange}
                 />
             </ErrorBoundary>
         </div>
@@ -1454,9 +1469,9 @@ function ImportView({ onDataImported, contextJob }) {
                 {!isPrompting ? (
                     <>
                         <button onClick={handleImport} className="action-btn large">
-                            Select CSV File
+                            Select Data File (CSV/Excel)
                         </button>
-                        <p className="helper-text">Select a CSV file containing test data (Time, Weight, etc.)</p>
+                        <p className="helper-text">Select a CSV or Excel file containing test data (Time, Weight, etc.)</p>
                     </>
                 ) : (
                     <div className="job-prompt-card">
@@ -1488,7 +1503,13 @@ function ImportView({ onDataImported, contextJob }) {
     );
 }
 
+<<<<<<< HEAD
 function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitChange, onTimeUnitChange, onAddData, onRemoveDataSet, onUpdateDataSet }) {
+=======
+function ReportView({ job, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChange, onAddData, onRemoveDataSet, onUpdateDataSet }) {
+    // xUnit is now passed from parent
+
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
     if (!job || !job.dataSets || job.dataSets.length === 0) {
         return (
             <div className="placeholder-card">
@@ -1527,6 +1548,7 @@ function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitC
                     </select>
                 </div>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center', background: 'var(--bg-card)', padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--border)' }}>
+<<<<<<< HEAD
                     <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Time:</span>
                     <select
                         value={displayTimeUnit}
@@ -1535,13 +1557,27 @@ function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitC
                     >
                         <option value="min">min</option>
                         <option value="hrs">hrs</option>
+=======
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Time Axis:</span>
+                    <select
+                        value={xUnit}
+                        onChange={e => onXUnitChange(e.target.value)}
+                        style={{ background: 'var(--bg-dark)', border: '1px solid var(--border)', color: 'var(--yellow-accent)', padding: '2px 8px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+                    >
+                        <option value="min">Minutes</option>
+                        <option value="hour">Hours</option>
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                     </select>
                 </div>
             </div>
 
             <div className="datasets-scroll-area" style={{ display: 'flex', flexDirection: 'column', gap: '40px' }}>
                 {job.dataSets.map((dataSet, index) => {
+<<<<<<< HEAD
                     const stats = processChartData(dataSet.data, [], displayUnit, displayTimeUnit, dataSet.inputTimeUnit);
+=======
+                    const stats = processChartData(dataSet.data, [], displayUnit, xUnit);
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                     if (!stats) return <div key={index}>Error processing data set {index + 1}</div>;
 
                     return (
@@ -1635,7 +1671,7 @@ function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitC
                                             },
                                             scales: {
                                                 x: {
-                                                    title: { display: true, text: 'Elapsed Time (min)', color: '#8b949e' },
+                                                    title: { display: true, text: `Elapsed Time (${xUnit === 'hour' ? 'hr' : 'min'})`, color: '#8b949e' },
                                                     ticks: { maxTicksLimit: 15, color: '#8b949e' },
                                                     grid: { color: 'rgba(33, 51, 77, 0.5)' }
                                                 },
@@ -1869,11 +1905,13 @@ function StandardFinder({ onComplete, onClose }) {
     );
 }
 
-function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob }) {
+const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit }) => {
     // data is actually the job object now due to activeJob refactor
     const job = data;
     const dataSets = job?.dataSets || [];
     const firstData = dataSets[0]?.data || [];
+
+    console.log("CertificateView Render:", { jobId, jobMetadataId: job?.id, draftCount: job?.metadata?.drafts?.length });
 
     const [formData, setFormData] = useState({
         soldTo: '',
@@ -1965,8 +2003,8 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     // We compute stats for each dataset individually for the preview
     const allChartStats = useMemo(() => {
         const serials = formData.instruments?.map(inst => inst.serialNo).filter(Boolean).flatMap(s => s.split(/[, \s]+/)) || [];
-        return dataSets.map(ds => processChartData(ds.data, serials));
-    }, [dataSets, formData.instruments]);
+        return dataSets.map(ds => processChartData(ds.data, serials, displayUnit, xUnit));
+    }, [dataSets, formData.instruments, displayUnit, xUnit]);
 
     // chartStats (legacy single) points to the first one for auto-fill logic
     const chartStats = allChartStats[0] || null;
@@ -2040,11 +2078,11 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     // Fallback to currently selected SharePoint job if no recorded data exists
                     current = {
                         ...current,
-                        projectRef: selectedJob.QuoteNum || current.projectRef,
-                        soldTo: selectedJob.LeadCompany || selectedJob.Customer || current.soldTo,
-                        customerPO: selectedJob.PONumber || current.customerPO,
-                        buyer: selectedJob.Customer || selectedJob.LeadName || current.buyer,
-                        facilityLocation: selectedJob.Location || selectedJob.JobLocation || current.facilityLocation
+                        projectRef: selectedJob.QuoteNum || '',
+                        soldTo: selectedJob.LeadCompany || selectedJob.Customer || '',
+                        customerPO: selectedJob.PONumber || '',
+                        buyer: selectedJob.Customer || selectedJob.LeadName || '',
+                        facilityLocation: selectedJob.Location || selectedJob.JobLocation || selectedJob.ShippingAddress || ''
                     };
                 }
 
@@ -2142,6 +2180,7 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         });
     };
 
+<<<<<<< HEAD
     const onPhotoChange = (e) => {
         const files = Array.from(e.target.files);
         const MAX_DIM = 1200; // Max width or height in pixels
@@ -2180,9 +2219,59 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     });
                 };
                 img.src = event.target.result;
+=======
+    const compressImage = (base64Str, maxWidth = 1024, maxHeight = 1024, quality = 0.7) => {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.src = base64Str;
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                let width = img.width;
+                let height = img.height;
+
+                if (width > height) {
+                    if (width > maxWidth) {
+                        height *= maxWidth / width;
+                        width = maxWidth;
+                    }
+                } else {
+                    if (height > maxHeight) {
+                        width *= maxHeight / height;
+                        height = maxHeight;
+                    }
+                }
+
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                resolve(canvas.toDataURL('image/jpeg', quality));
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
             };
-            reader.readAsDataURL(file);
         });
+    };
+
+    const onPhotoChange = async (e) => {
+        const files = Array.from(e.target.files);
+        for (const file of files) {
+            const reader = new FileReader();
+            const base64 = await new Promise((resolve) => {
+                reader.onload = (event) => resolve(event.target.result);
+                reader.readAsDataURL(file);
+            });
+
+            // Compress immediately
+            const compressed = await compressImage(base64);
+
+            setFormData(prev => {
+                const newPhotos = [...(prev.photos || []), compressed].slice(0, 4);
+                const newFormData = { ...prev, photos: newPhotos };
+                if (onUpdateMetadata) {
+                    onUpdateMetadata(jobId, { certData: newFormData });
+                }
+                return newFormData;
+            });
+        }
     };
 
     const removePhoto = (index) => {
@@ -2195,6 +2284,47 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             window.electronAPI.saveData(newFormData, 'cert-info.json');
             return newFormData;
         });
+    };
+
+    const handleSaveDraft = () => {
+        const draftName = prompt("Enter a name for this draft:", `Draft ${new Date().toLocaleString()}`);
+        if (!draftName) return;
+
+        const newDraft = {
+            name: draftName,
+            data: { ...formData }, // clone
+            timestamp: Date.now()
+        };
+
+        const existingDrafts = job?.metadata?.drafts || [];
+        const newDrafts = [newDraft, ...existingDrafts];
+
+        console.log("Saving Draft:", { jobId, draftName, newDraftCount: newDrafts.length });
+
+        if (onUpdateMetadata) {
+            onUpdateMetadata(jobId, { drafts: newDrafts });
+        }
+        alert("Draft saved successfully!");
+    };
+
+    const handleLoadDraft = (draft) => {
+        if (window.confirm(`Load draft "${draft.name}"? This will replace your current unsaved editor content.`)) {
+            setFormData(draft.data);
+            // Also update the active certData so the "current" state is saved
+            if (onUpdateMetadata) {
+                onUpdateMetadata(jobId, { certData: draft.data });
+            }
+        }
+    };
+
+    const handleRemoveDraft = (e, index) => {
+        e.stopPropagation();
+        if (window.confirm("Are you sure you want to delete this draft?")) {
+            const newDrafts = job.metadata.drafts.filter((_, i) => i !== index);
+            if (onUpdateMetadata) {
+                onUpdateMetadata(jobId, { drafts: newDrafts });
+            }
+        }
     };
 
     const finalizePDF = async () => {
@@ -2226,6 +2356,7 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         </button>
                     </div>
                 </div>
+<<<<<<< HEAD
                 {/* Page 1: Fixed A4 height with footer pinned to bottom */}
                 <div className="certificate-paper" style={{ paddingLeft: '44px', minHeight: '277mm', maxHeight: '277mm', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                     {/* Page 1 content sections (excluding footer) */}
@@ -2393,6 +2524,278 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
                         </div>
                     </div>
+=======
+                <div className="certificate-paper" style={{ paddingLeft: '44px' }}>
+                    {(() => {
+                        const sections = formData.sectionOrder || ['header', 'infoGrid', 'testTable', 'footer', 'graphs', 'photos'];
+                        const isMain = (id) => ['header', 'infoGrid', 'testTable', 'footer'].includes(id);
+
+                        const renderSectionContent = (sectionId) => {
+                            let content = null;
+                            switch (sectionId) {
+                                case 'header':
+                                    content = (
+                                        <>
+                                            <div className="cert-header">
+                                                <div className="logo-group">
+                                                    <img src={logo} alt="Hydro-Wates Logo" className="cert-logo" style={{ height: '42px', objectFit: 'contain', marginBottom: '2px' }} />
+                                                </div>
+                                                <div className="header-info">
+                                                    <strong>Providing Proof-Load Testing Services</strong><br />
+                                                    to the Maritime, Petroleum, & Heavy<br />
+                                                    Construction Industries - Worldwide
+                                                </div>
+                                                <div className="contact-info">
+                                                    <strong>8100 Lockheed Avenue</strong><br />
+                                                    Houston, Texas 77061<br />
+                                                    Tel: (713) 643-9990
+                                                </div>
+                                            </div>
+                                            <h1 className="cert-title">PROOF-LOAD TEST CERTIFICATE</h1>
+                                        </>
+                                    );
+                                    break;
+                                case 'infoGrid':
+                                    content = (
+                                        <div className="cert-grid-main">
+                                            <div className="cert-box">
+                                                <div className="label-top">SOLD TO:</div>
+                                                <div className="content-multiline">{formData.soldTo}</div>
+                                            </div>
+                                            <div className="cert-box">
+                                                <div className="label-top">TEST FACILITY & LOCATION:</div>
+                                                <div className="content-multiline">{formData.facilityLocation}</div>
+                                            </div>
+                                            <div className="cert-row-5">
+                                                <div className="cert-box"><div className="label-top">Customer P.O.</div><div className="content-center">{formData.customerPO}</div></div>
+                                                <div className="cert-box"><div className="label-top">Buyer</div><div className="content-center">{formData.buyer}</div></div>
+                                                <div className="cert-box"><div className="label-top">HWI Project Ref.</div><div className="content-center">{formData.projectRef}</div></div>
+                                                <div className="cert-box"><div className="label-top">Test Date</div><div className="content-center">{formData.testDate}</div></div>
+                                                <div className="cert-box"><div className="label-top">Project Mgr.</div><div className="content-center">{formData.projectMgr}</div></div>
+                                                <div className="cert-box"><div className="label-top">Certificate No.</div><div className="content-center">{formData.certNo}</div></div>
+                                            </div>
+                                            <div className="cert-row-6" style={{ flexDirection: 'column', border: 'none', borderTop: '1.5px solid #000', marginTop: '12px' }}>
+                                                <div className="cert-row-6" style={{ borderBottom: '1px solid #000', backgroundColor: '#f9f9f9' }}>
+                                                    <div className="cert-box"><div className="label-top">Instrument</div></div>
+                                                    <div className="cert-box"><div className="label-top">Capacity</div></div>
+                                                    <div className="cert-box"><div className="label-top">Serial No.</div></div>
+                                                    <div className="cert-box"><div className="label-top">Data Link</div></div>
+                                                    <div className="cert-box"><div className="label-top">Accuracy</div></div>
+                                                    <div className="cert-box"><div className="label-top">Target Load</div></div>
+                                                </div>
+                                                {formData.instruments?.map((inst, i) => (
+                                                    <div key={i} className="cert-row-6" style={{ borderBottom: i < formData.instruments.length - 1 ? '1px solid #000' : 'none' }}>
+                                                        <div className="cert-box"><div className="content-center">{inst.instrument}</div></div>
+                                                        <div className="cert-box"><div className="content-center">{inst.capacity}</div></div>
+                                                        <div className="cert-box"><div className="content-center">{inst.serialNo}</div></div>
+                                                        <div className="cert-box"><div className="content-center">{inst.dataLink}</div></div>
+                                                        <div className="cert-box"><div className="content-center">{inst.accuracy}</div></div>
+                                                        <div className="cert-box"><div className="content-center">{inst.targetLoad}</div></div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    );
+                                    break;
+                                case 'testTable':
+                                    content = (
+                                        <table className="cert-table">
+                                            <thead>
+                                                <tr>
+                                                    <th style={{ width: '40px' }}>Item</th>
+                                                    <th>Item Description</th>
+                                                    <th style={{ width: '80px' }}>Local Time</th>
+                                                    <th style={{ width: '80px' }}>Test Dur.</th>
+                                                    <th style={{ width: '100px' }}>Measured Force</th>
+                                                    <th style={{ width: '60px' }}>Accept</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr>
+                                                    <td></td>
+                                                    <td className="text-left" style={{ paddingBottom: '8px' }}>
+                                                        <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                            <div><strong style={{ color: '#555' }}>Manufacturer:</strong> {formData.equipmentManufacturer || 'N/A'}</div>
+                                                            <div><strong style={{ color: '#555' }}>S/N:</strong> {formData.equipmentSerial || 'N/A'}</div>
+                                                            <div><strong style={{ color: '#555' }}>WLL:</strong> {formData.equipmentWll || 'N/A'}</div>
+                                                        </div>
+                                                        <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
+                                                        {formData.hasAuxHook && (
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Auxiliary Hook WLL:</strong> {formData.auxHookWll || 'N/A'}</div>
+                                                        )}
+                                                        <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
+                                                            <strong>Procedure Summary:</strong><br />
+                                                            <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
+                                                                {formData.procedureSummary}
+                                                            </div>
+                                                        </div>
+                                                    </td>
+                                                    <td></td>
+                                                    <td></td>
+                                                    <td></td>
+                                                    <td></td>
+                                                </tr>
+                                                {formData.tests
+                                                    .slice(0, parseInt(formData.numTests))
+                                                    .map((test, index) => (
+                                                        <tr key={index}>
+                                                            <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
+                                                            <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
+                                                                <div className="font-bold" style={{ fontSize: '0.95rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                    {test.itemDescription || formData.equipmentTested}
+                                                                </div>
+                                                                <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
+                                                                    <strong>Hook:</strong> {test.hookTested || 'Main Hook'} | <strong>Type:</strong> {test.loadType}
+                                                                </div>
+                                                                <div className="font-bold" style={{ marginTop: '4px', color: '#1a3a6c', fontSize: '0.8rem' }}>
+                                                                    TEST LOAD: {test.wllPercentage || '100%'} WLL
+                                                                </div>
+                                                            </td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.localTime}</td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.testDuration}</td>
+                                                            <td className="force-val" style={{ fontSize: '1rem', verticalAlign: 'middle', paddingTop: '8px' }}>{test.measuredForce} lbs</td>
+                                                            <td className="accept-val" style={{ color: test.testResults === 'PASS' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                        </tr>
+                                                    ))}
+                                            </tbody>
+                                        </table>
+                                    );
+                                    break;
+                                case 'footer':
+                                    content = (
+                                        <>
+                                            <div className="cert-footer-grid" style={{ marginTop: '8px' }}>
+                                                <div className="cert-box">
+                                                    <div className="label-top">Project Manager:</div>
+                                                    <div className="content-val">{formData.projectMgr}</div>
+                                                </div>
+                                                <div className="cert-box">
+                                                    <div className="label-top">Date:</div>
+                                                    <div className="content-val">{formData.testDate}</div>
+                                                </div>
+                                                <div className="cert-box signature-row">
+                                                    <div className="label-top">Signature:</div>
+                                                    <div className="signature-font">{formData.projectMgr}</div>
+                                                </div>
+                                                <div className="cert-box">
+                                                    <div className="label-top">Test Results:</div>
+                                                    <div className="content-val font-bold">{formData.testResults}</div>
+                                                </div>
+                                            </div>
+                                            <div style={{ marginTop: '4px', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
+                                                Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
+                                            </div>
+                                        </>
+                                    );
+                                    break;
+                                case 'graphs':
+                                    if (allChartStats.length === 0) return null;
+                                    content = (
+                                        <>
+                                            {allChartStats.map((stats, idx) => (
+                                                <div key={idx} className="cert-chart-section" style={{
+                                                    pageBreakInside: 'avoid',
+                                                    breakInside: 'avoid',
+                                                    pageBreakBefore: formData.graphPageBreaks[idx] ? 'always' : 'auto',
+                                                    breakBefore: formData.graphPageBreaks[idx] ? 'page' : 'auto',
+                                                    marginTop: '20px'
+                                                }}>
+                                                    <div className="cert-chart-header">
+                                                        {allChartStats.length > 1 ? `LOAD TEST GRAPH #${idx + 1} (${dataSets[idx]?.name || 'N/A'})` : (dataSets[idx]?.name || 'LOAD TEST GRAPH')}
+                                                    </div>
+                                                    <div className="cert-chart-container" style={{ height: '280px' }}>
+                                                        <Line
+                                                            data={stats.chartData}
+                                                            options={{
+                                                                responsive: true,
+                                                                maintainAspectRatio: false,
+                                                                animation: false,
+                                                                elements: {
+                                                                    line: { fill: false, borderColor: '#1a3a6c', borderWidth: 2, tension: 0.1 },
+                                                                    point: { radius: 0 }
+                                                                },
+                                                                plugins: {
+                                                                    legend: {
+                                                                        display: stats.chartData.datasets.length > 1,
+                                                                        position: 'top',
+                                                                        labels: { boxWidth: 10, font: { size: 8, weight: 'bold' }, color: '#000' }
+                                                                    },
+                                                                    title: { display: false }
+                                                                },
+                                                                scales: {
+                                                                    x: {
+                                                                        display: true,
+                                                                        title: { display: true, text: `Elapsed Time (${xUnit === 'hour' ? 'hr' : 'min'})`, font: { size: 9, weight: 'bold' } },
+                                                                        ticks: { font: { size: 7 }, maxTicksLimit: 12 },
+                                                                        grid: { color: '#eee' }
+                                                                    },
+                                                                    y: {
+                                                                        display: true,
+                                                                        beginAtZero: true,
+                                                                        title: { display: true, text: dataSets[idx]?.yAxisLabel || `Weight (${displayUnit})`, font: { size: 9, weight: 'bold' } },
+                                                                        ticks: { font: { size: 7 } },
+                                                                        grid: { color: '#eee' }
+                                                                    }
+                                                                }
+                                                            }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </>
+                                    );
+                                    break;
+                                case 'photos':
+                                    if (!formData.photos || formData.photos.length === 0) return null;
+                                    content = (
+                                        <div className="cert-photos-section">
+                                            <div className="cert-photos-header">SITE PHOTOS</div>
+                                            <div className="cert-photos-grid">
+                                                {formData.photos.map((photo, index) => (
+                                                    <div key={index} className="cert-photo-item">
+                                                        <img src={photo} alt={`Site photo ${index + 1}`} />
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    );
+                                    break;
+                                default:
+                                    return null;
+                            }
+                            if (!content) return null;
+                            return (
+                                <div
+                                    key={sectionId}
+                                    className={`cert-section-wrapper${draggingId === sectionId ? ' dragging' : ''}`}
+                                    data-section={sectionId}
+                                    draggable
+                                    onDragStart={() => handleDragStart(sectionId)}
+                                    onDragOver={(e) => handleDragOver(e, sectionId)}
+                                    onDragEnd={handleDragEnd}
+                                >
+                                    <div className="cert-drag-handle no-print" title={`Drag to reorder: ${sectionLabel(sectionId)}`}>⋮⋮</div>
+                                    {dragOverId === sectionId && draggingId !== sectionId && <div className="cert-drop-indicator" />}
+                                    {content}
+                                </div>
+                            );
+                        };
+
+                        const mainSections = sections.filter(isMain);
+                        const otherSections = sections.filter(id => !isMain(id));
+
+                        return (
+                            <>
+                                <div className="cert-main-page">
+                                    {mainSections.map(id => renderSectionContent(id))}
+                                </div>
+                                <div className="cert-attachments">
+                                    {otherSections.map(id => renderSectionContent(id))}
+                                </div>
+                            </>
+                        );
+                    })()}
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                 </div>
 
                 {/* Remaining pages: Graphs and Photos */}
@@ -2497,8 +2900,47 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
     return (
         <div className="certificate-form-container">
-            <h2>Generate Test Certificate</h2>
-            <p>Fill in the details below. technical values are auto-filled from your data.</p>
+            <div className="cert-editor-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', background: 'var(--bg-card)', padding: '20px', borderRadius: '10px', border: '1px solid var(--border)' }}>
+                <div>
+                    <h2 style={{ margin: 0, color: 'var(--yellow-accent)' }}>Certificate Editor</h2>
+                    <p style={{ margin: '5px 0 0 0', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                        Job: <strong style={{ color: 'white' }}>{job?.metadata?.jobNumber || 'N/A'}</strong>
+                        <span style={{ marginLeft: '10px', fontSize: '0.7rem', opacity: 0.6 }}>ID: {jobId}</span>
+                        <span style={{ marginLeft: '10px', padding: '2px 6px', background: 'var(--accent)', borderRadius: '4px', fontSize: '0.7rem' }}>
+                            {job?.metadata?.drafts?.length || 0} Drafts
+                        </span>
+                    </p>
+                </div>
+                <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
+                    <div className="draft-management" style={{ display: 'flex', gap: '10px', alignItems: 'center', borderRight: '1px solid var(--border)', paddingRight: '15px' }}>
+                        <button
+                            onClick={handleSaveDraft}
+                            className="action-btn secondary small"
+                            title="Save current progress as a new draft checkpoint"
+                            style={{ cursor: 'pointer', position: 'relative', zIndex: 10 }}
+                        >
+                            💾 Save as Draft
+                        </button>
+                        <select
+                            className="draft-select"
+                            onChange={(e) => {
+                                const idx = e.target.value;
+                                if (idx !== "") handleLoadDraft(job.metadata.drafts[idx]);
+                                e.target.value = ""; // Reset
+                            }}
+                            style={{ background: 'var(--bg-dark)', color: 'white', border: '1px solid var(--border)', padding: '5px 10px', borderRadius: '4px', cursor: 'pointer' }}
+                        >
+                            <option value="">-- Load Saved Draft --</option>
+                            {job?.metadata?.drafts?.map((d, i) => (
+                                <option key={i} value={i}>{d.name} ({new Date(d.timestamp).toLocaleDateString()})</option>
+                            ))}
+                        </select>
+                    </div>
+                    <button onClick={showPreview} className="action-btn large">
+                        👁️ Preview Certificate
+                    </button>
+                </div>
+            </div>
 
             <div className="form-grid">
                 <section className="form-section">
@@ -2778,12 +3220,11 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         </div>
                         <div className="form-group">
                             <label>% of WLL</label>
-                            <select value={test.wllPercentage} onChange={(e) => handleTestInput(index, 'wllPercentage', e.target.value)}>
-                                <option value="50%">50%</option>
-                                <option value="75%">75%</option>
-                                <option value="100%">100%</option>
-                                <option value="125%">125%</option>
-                            </select>
+                            <input
+                                value={test.wllPercentage}
+                                onChange={(e) => handleTestInput(index, 'wllPercentage', e.target.value)}
+                                placeholder="e.g. 100%"
+                            />
                         </div>
                         <div className="form-group">
                             <label>Measured Force (lbs)</label>
@@ -2833,9 +3274,15 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <label>Duration (min)</label>
                             <input
                                 list={`duration-suggestions-${index}`}
+<<<<<<< HEAD
                                 value={test.testDuration || ''}
                                 onChange={(e) => handleTestInput(index, 'testDuration', e.target.value)}
                                 placeholder="Enter duration..."
+=======
+                                value={test.testDuration}
+                                onChange={(e) => handleTestInput(index, 'testDuration', e.target.value)}
+                                placeholder="Select or type duration..."
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                             />
                             <datalist id={`duration-suggestions-${index}`}>
                                 <option value="5 minutes" />
@@ -2847,9 +3294,9 @@ function CertificateView({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 </section>
             ))}
 
-            <div className="form-actions mt-4" style={{ display: 'flex', justifyContent: 'center', padding: '40px 0' }}>
-                <button onClick={showPreview} className="action-btn large" style={{ width: '400px' }}>
-                    Preview Certificate
+            <div className="form-actions mt-4" style={{ display: 'flex', justifyContent: 'center', padding: '40px 0', borderTop: '1px solid var(--border)' }}>
+                <button onClick={showPreview} className="action-btn large" style={{ width: '500px', height: '60px', fontSize: '1.2rem' }}>
+                    👁️ Preview Full Certificate
                 </button>
             </div>
         </div>
@@ -2930,7 +3377,11 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [showRecoveryPrompt, setShowRecoveryPrompt] = useState(false);
     const [isCertPreview, setIsCertPreview] = useState(false);
     const [displayUnit, setDisplayUnit] = useState('lbs');
+<<<<<<< HEAD
     const [displayTimeUnit, setDisplayTimeUnit] = useState('min');
+=======
+    const [xUnit, setXUnit] = useState('min');
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
 
     // --- Lifted Live Telemetry & Logging State ---
     const [devices, setDevices] = useState({}); // tag -> latest packet
@@ -2943,6 +3394,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [previewData, setPreviewData] = useState([]); // Rolling buffer for preview
 
     // Refs for IPC listener access
+    const [saveStatus, setSaveStatus] = useState('synced'); // 'synced' | 'saving' | 'error'
     const devicesRef = useRef({});
     const selectedTagsRef = useRef(selectedTags);
     const cellCountRef = useRef(cellCount);
@@ -3073,6 +3525,34 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         checkRecovery();
     }, []);
 
+    // --- CENTRAL PERSISTENCE ENGINE ---
+    useEffect(() => {
+        if (allJobs.length === 0) return;
+
+        const timer = setTimeout(() => {
+            setSaveStatus('saving');
+            window.electronAPI.saveData({
+                jobs: allJobs,
+                lastActiveJobId: activeJobId
+            }, 'dashboard-data.json')
+                .then(res => {
+                    if (res?.success) {
+                        setSaveStatus('synced');
+                        console.log("Dashboard data persisted. Jobs:", allJobs.length);
+                    } else {
+                        setSaveStatus('error');
+                        console.error("Persistence failed:", res?.error);
+                    }
+                })
+                .catch(err => {
+                    setSaveStatus('error');
+                    console.error("Save error:", err);
+                });
+        }, 500); // Debounce saves by 500ms
+
+        return () => clearTimeout(timer);
+    }, [allJobs, activeJobId]);
+
     // Active Polling & Keep Awake Sync (Persistent across tabs)
     useEffect(() => {
         const activeTags = selectedTags.slice(0, cellCount);
@@ -3169,10 +3649,6 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
         setAllJobs(updatedJobs);
         setActiveJobId(finalJobId);
-        window.electronAPI.saveData({
-            jobs: updatedJobs,
-            lastActiveJobId: finalJobId
-        }, 'dashboard-data.json');
 
         if (window.electronAPI.clearRecovery) {
             window.electronAPI.clearRecovery();
@@ -3182,17 +3658,25 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     };
 
     const handleUpdateJobMetadata = (jobId, metadataUpdates) => {
-        const updatedJobs = allJobs.map(j => {
-            if (j.id.toString() === jobId?.toString()) {
-                return { ...j, metadata: { ...j.metadata, ...metadataUpdates } };
+        setAllJobs(prevJobs => {
+            let matchFound = false;
+            const updatedJobs = prevJobs.map(j => {
+                if (j.id.toString() === jobId?.toString()) {
+                    matchFound = true;
+                    // Log the actual update for debugging
+                    if (metadataUpdates.drafts) {
+                        console.log(`Updating drafts for job ${jobId}. New count: ${metadataUpdates.drafts.length}`);
+                    }
+                    return { ...j, metadata: { ...j.metadata, ...metadataUpdates } };
+                }
+                return j;
+            });
+
+            if (!matchFound) {
+                console.warn("handleUpdateJobMetadata: No job found matching ID:", jobId);
             }
-            return j;
+            return updatedJobs;
         });
-        setAllJobs(updatedJobs);
-        window.electronAPI.saveData({
-            jobs: updatedJobs,
-            lastActiveJobId: activeJobId
-        }, 'dashboard-data.json');
     };
 
     const handleJobChange = (id) => {
@@ -3264,6 +3748,9 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         {deviceStatus.charAt(0).toUpperCase() + deviceStatus.slice(1)}
                     </div>
                     <div className="app-header-right">
+                        <div className={`save-indicator ${saveStatus}`} title={`Data persistence: ${saveStatus}`}>
+                            {saveStatus === 'saving' ? '⏳' : saveStatus === 'error' ? '❌' : '☁️'}
+                        </div>
                         <button onClick={onOpenSettings} className="action-btn secondary circle" title="Settings">⚙️</button>
                     </div>
                 </header>
@@ -3281,11 +3768,20 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')}>Settings</button>
                     </div>
                 )}
+<<<<<<< HEAD
                 <div className="content-area" style={isCertPreview ? { padding: 0, margin: 0, overflowY: 'auto' } : {}}>
+=======
+                <div className="content-area" style={isCertPreview ? { padding: 0, margin: 0 } : {}}>
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                     {activeTab === 'welcome' && (
                         <WelcomeView
                             onJobSelected={(job) => {
                                 setSelectedSharePointJob(job);
+<<<<<<< HEAD
+=======
+                                const existingJob = allJobs.find(j => j.metadata?.jobNumber === job.QuoteNum);
+                                setActiveJobId(existingJob ? existingJob.id : null);
+>>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                                 setActiveTab('cert');
                             }}
                             onOpenSettings={() => setActiveTab('settings')}
@@ -3301,7 +3797,9 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             onBack={() => setActiveTab('welcome')}
                             onSelectForLive={(job) => {
                                 setSelectedSharePointJob(job);
-                                setActiveTab('live');
+                                const existingJob = allJobs.find(j => j.metadata?.jobNumber === job.QuoteNum);
+                                setActiveJobId(existingJob ? existingJob.id : null);
+                                setActiveTab('cert');
                             }}
                             onImportCsv={(job) => {
                                 setImportContext(job);
@@ -3338,6 +3836,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 setPreviewData={setPreviewData}
                                 displayUnit={displayUnit}
                                 onUnitChange={setDisplayUnit}
+                                xUnit={xUnit}
+                                onXUnitChange={setXUnit}
                             />
                         </ErrorBoundary>
                     )}
@@ -3354,6 +3854,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             displayTimeUnit={displayTimeUnit}
                             onUnitChange={setDisplayUnit}
                             onTimeUnitChange={setDisplayTimeUnit}
+                            xUnit={xUnit}
+                            onXUnitChange={setXUnit}
                             onAddData={() => triggerAppendData(activeJob)}
                             onRemoveDataSet={(idx) => handleRemoveDataSet(activeJob.id, idx)}
                             onUpdateDataSet={(idx, updates) => handleUpdateDataSet(activeJob.id, idx, updates)}
@@ -3366,6 +3868,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             selectedJob={selectedSharePointJob}
                             onUpdateMetadata={handleUpdateJobMetadata}
                             onPreviewModeChange={(val) => setIsCertPreview(val)}
+                            xUnit={xUnit}
+                            displayUnit={displayUnit}
                         />
                     )}
                     {activeTab === 'settings' && <SettingsView onSettingsSaved={() => { }} />}

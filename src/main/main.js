@@ -6,6 +6,7 @@ require('dotenv').config();
 const HID = require('node-hid');
 const { PublicClientApplication } = require('@azure/msal-node');
 const axios = require('axios');
+const XLSX = require('xlsx-js-style');
 
 const VID = 0x1781;
 const PID = 0x0ba4;
@@ -506,12 +507,29 @@ async function handleFileOpen() {
     const { canceled, filePaths } = await dialog.showOpenDialog({
         properties: ['openFile'],
         filters: [
-            { name: 'CSV Files', extensions: ['csv'] }
+            { name: 'Data Files', extensions: ['csv', 'xlsx', 'xls'] },
+            { name: 'CSV Files', extensions: ['csv'] },
+            { name: 'Excel Files', extensions: ['xlsx', 'xls'] }
         ]
     });
     if (!canceled) {
-        const content = fs.readFileSync(filePaths[0], 'utf-8');
-        return content;
+        const filePath = filePaths[0];
+        const ext = path.extname(filePath).toLowerCase();
+
+        if (ext === '.xlsx' || ext === '.xls') {
+            try {
+                const workbook = XLSX.readFile(filePath);
+                const firstSheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[firstSheetName];
+                // Convert to CSV string to stay compatible with renderer's PapaParse
+                return XLSX.utils.sheet_to_csv(worksheet);
+            } catch (err) {
+                console.error('Failed to parse Excel file:', err);
+                throw err;
+            }
+        } else {
+            return fs.readFileSync(filePath, 'utf-8');
+        }
     }
 }
 
@@ -1449,18 +1467,6 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
-    // Clear saved data on restart
-    ['dashboard-data.json', 'cert-info.json'].forEach(file => {
-        const filePath = getDataPath(file);
-        if (fs.existsSync(filePath)) {
-            try {
-                fs.unlinkSync(filePath);
-            } catch (e) {
-                console.error(`Failed to clear ${file}:`, e);
-            }
-        }
-    });
-
     // Load T24 Group ID from settings
     const settings = loadSettings();
     if (settings.t24GroupId !== undefined) {

@@ -99,6 +99,34 @@ body {
   padding: 0 24px;
 }
 
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.save-indicator {
+  font-size: 1.2rem;
+  opacity: 0.6;
+  transition: all 0.3s;
+  cursor: help;
+}
+
+.save-indicator.saving {
+  opacity: 1;
+  transform: scale(1.1);
+  filter: drop-shadow(0 0 5px var(--yellow-accent));
+}
+
+.save-indicator.error {
+  opacity: 1;
+  filter: drop-shadow(0 0 5px #f85149);
+}
+
+.save-indicator.synced {
+  opacity: 0.4;
+}
+
 .app-header-left {
   display: flex;
   align-items: center;
@@ -572,6 +600,23 @@ body {
   align-items: center;
 }
 
+/* -------------------------------------------------------------------------- */
+/* CERTIFICATE LAYOUT FIXES                                                   */
+/* -------------------------------------------------------------------------- */
+
+.cert-main-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 275mm;
+  /* A4 (297mm) minus top/bottom padding (10mm + 10mm) approximately */
+  position: relative;
+}
+
+.cert-section-wrapper[data-section="footer"] {
+  margin-top: auto;
+  padding-bottom: 2mm;
+}
+
 @media print {
   @page {
     size: A4 portrait;
@@ -603,11 +648,16 @@ body {
     border: none !important;
     box-shadow: none !important;
     margin: 0 !important;
-    padding: 10mm !important;
+    padding: 10mm 12mm !important;
     width: 210mm !important;
     max-width: 100% !important;
     height: auto !important;
     overflow: visible !important;
+  }
+
+  .cert-main-page {
+    min-height: 275mm !important;
+    break-after: page;
   }
 
   .cert-header,
