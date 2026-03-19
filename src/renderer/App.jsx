@@ -144,7 +144,7 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
             return true;
         });
 
-        const times = filteredData.map(d => timeToSec(d[timeKey]));
+        const filteredTimes = filteredData.map(d => timeToSec(d[timeKey]));
         const totalLoads = filteredData.map(d => weightKeys.reduce((sum, key) => sum + getValInLbs(d, key), 0));
 
         const maxWeight = totalLoads.length > 0 ? Math.max(...totalLoads) : 0;
@@ -173,8 +173,8 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
         }
 
         // 4. Duration calculation
-        const minVal = times.length > 0 ? Math.min(...times) : 0;
-        const maxVal = times.length > 0 ? Math.max(...times) : 0;
+        const minVal = filteredTimes.length > 0 ? Math.min(...filteredTimes) : 0;
+        const maxVal = filteredTimes.length > 0 ? Math.max(...filteredTimes) : 0;
         let totalTimeSec = maxVal - minVal;
 
         // Convert based on requested display unit
@@ -193,7 +193,7 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
             timeKey,
             weightKey: weightKeys[0],
             chartData: {
-                labels: times.map(seconds => {
+                labels: filteredTimes.map(seconds => {
                     const val = displayTimeUnit === 'hrs' ? seconds / 3600 : seconds / 60;
                     return val.toFixed(2);
                 }),
@@ -1503,13 +1503,7 @@ function ImportView({ onDataImported, contextJob }) {
     );
 }
 
-<<<<<<< HEAD
-function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitChange, onTimeUnitChange, onAddData, onRemoveDataSet, onUpdateDataSet }) {
-=======
-function ReportView({ job, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChange, onAddData, onRemoveDataSet, onUpdateDataSet }) {
-    // xUnit is now passed from parent
-
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
+function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitChange, onTimeUnitChange, xUnit, onXUnitChange, onAddData, onRemoveDataSet, onUpdateDataSet }) {
     if (!job || !job.dataSets || job.dataSets.length === 0) {
         return (
             <div className="placeholder-card">
@@ -1548,7 +1542,6 @@ function ReportView({ job, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChan
                     </select>
                 </div>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center', background: 'var(--bg-card)', padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--border)' }}>
-<<<<<<< HEAD
                     <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Time:</span>
                     <select
                         value={displayTimeUnit}
@@ -1557,7 +1550,9 @@ function ReportView({ job, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChan
                     >
                         <option value="min">min</option>
                         <option value="hrs">hrs</option>
-=======
+                    </select>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', background: 'var(--bg-card)', padding: '5px 12px', borderRadius: '6px', border: '1px solid var(--border)' }}>
                     <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Time Axis:</span>
                     <select
                         value={xUnit}
@@ -1566,18 +1561,13 @@ function ReportView({ job, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChan
                     >
                         <option value="min">Minutes</option>
                         <option value="hour">Hours</option>
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                     </select>
                 </div>
             </div>
 
             <div className="datasets-scroll-area" style={{ display: 'flex', flexDirection: 'column', gap: '40px' }}>
                 {job.dataSets.map((dataSet, index) => {
-<<<<<<< HEAD
-                    const stats = processChartData(dataSet.data, [], displayUnit, displayTimeUnit, dataSet.inputTimeUnit);
-=======
-                    const stats = processChartData(dataSet.data, [], displayUnit, xUnit);
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
+                    const stats = processChartData(dataSet.data, [], displayUnit, displayTimeUnit, dataSet.inputTimeUnit, xUnit);
                     if (!stats) return <div key={index}>Error processing data set {index + 1}</div>;
 
                     return (
@@ -2180,46 +2170,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         });
     };
 
-<<<<<<< HEAD
-    const onPhotoChange = (e) => {
-        const files = Array.from(e.target.files);
-        const MAX_DIM = 1200; // Max width or height in pixels
-        const QUALITY = 0.6;  // JPEG compression quality (0-1)
-
-        files.forEach(file => {
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                const img = new Image();
-                img.onload = () => {
-                    // Calculate scaled dimensions
-                    let { width, height } = img;
-                    if (width > MAX_DIM || height > MAX_DIM) {
-                        if (width > height) {
-                            height = Math.round((height * MAX_DIM) / width);
-                            width = MAX_DIM;
-                        } else {
-                            width = Math.round((width * MAX_DIM) / height);
-                            height = MAX_DIM;
-                        }
-                    }
-
-                    // Draw to canvas and compress as JPEG
-                    const canvas = document.createElement('canvas');
-                    canvas.width = width;
-                    canvas.height = height;
-                    const ctx = canvas.getContext('2d');
-                    ctx.drawImage(img, 0, 0, width, height);
-                    const compressedBase64 = canvas.toDataURL('image/jpeg', QUALITY);
-
-                    setFormData(prev => {
-                        const newPhotos = [...(prev.photos || []), compressedBase64].slice(0, 4);
-                        const newFormData = { ...prev, photos: newPhotos };
-                        window.electronAPI.saveData(newFormData, 'cert-info.json');
-                        return newFormData;
-                    });
-                };
-                img.src = event.target.result;
-=======
     const compressImage = (base64Str, maxWidth = 1024, maxHeight = 1024, quality = 0.7) => {
         return new Promise((resolve) => {
             const img = new Image();
@@ -2246,7 +2196,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(img, 0, 0, width, height);
                 resolve(canvas.toDataURL('image/jpeg', quality));
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
             };
         });
     };
@@ -2356,175 +2305,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         </button>
                     </div>
                 </div>
-<<<<<<< HEAD
-                {/* Page 1: Fixed A4 height with footer pinned to bottom */}
-                <div className="certificate-paper" style={{ paddingLeft: '44px', minHeight: '277mm', maxHeight: '277mm', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                    {/* Page 1 content sections (excluding footer) */}
-                    <div style={{ flex: '0 0 auto' }}>
-                        {(formData.sectionOrder || ['header', 'infoGrid', 'testTable', 'footer', 'graphs', 'photos'])
-                            .filter(id => ['header', 'infoGrid', 'testTable'].includes(id))
-                            .map(sectionId => {
-                                let content = null;
-                                switch (sectionId) {
-                                    case 'header':
-                                        content = (
-                                            <>
-                                                <div className="cert-header">
-                                                    <div className="logo-group">
-                                                        <img src={logo} alt="Hydro-Wates Logo" className="cert-logo" style={{ height: '42px', objectFit: 'contain', marginBottom: '2px' }} />
-                                                    </div>
-                                                    <div className="header-info">
-                                                        <strong>Providing Proof-Load Testing Services</strong><br />
-                                                        to the Maritime, Petroleum, & Heavy<br />
-                                                        Construction Industries - Worldwide
-                                                    </div>
-                                                    <div className="contact-info">
-                                                        <strong>8100 Lockheed Avenue</strong><br />
-                                                        Houston, Texas 77061<br />
-                                                        Tel: (713) 643-9990
-                                                    </div>
-                                                </div>
-                                                <h1 className="cert-title">PROOF-LOAD TEST CERTIFICATE</h1>
-                                            </>
-                                        );
-                                        break;
-                                    case 'infoGrid':
-                                        content = (
-                                            <div className="cert-grid-main">
-                                                <div className="cert-box">
-                                                    <div className="label-top">SOLD TO:</div>
-                                                    <div className="content-multiline">{formData.soldTo}</div>
-                                                </div>
-                                                <div className="cert-box">
-                                                    <div className="label-top">TEST FACILITY & LOCATION:</div>
-                                                    <div className="content-multiline">{formData.facilityLocation}</div>
-                                                </div>
-                                                <div className="cert-row-5">
-                                                    <div className="cert-box"><div className="label-top">Customer P.O.</div><div className="content-center">{formData.customerPO}</div></div>
-                                                    <div className="cert-box"><div className="label-top">Buyer</div><div className="content-center">{formData.buyer}</div></div>
-                                                    <div className="cert-box"><div className="label-top">HWI Project Ref.</div><div className="content-center">{formData.projectRef}</div></div>
-                                                    <div className="cert-box"><div className="label-top">Test Date</div><div className="content-center">{formData.testDate}</div></div>
-                                                    <div className="cert-box"><div className="label-top">Project Mgr.</div><div className="content-center">{formData.projectMgr}</div></div>
-                                                    <div className="cert-box"><div className="label-top">Certificate No.</div><div className="content-center">{formData.certNo}</div></div>
-                                                </div>
-                                                <div className="cert-row-6" style={{ flexDirection: 'column', border: 'none' }}>
-                                                    {formData.instruments?.map((inst, i) => (
-                                                        <div key={i} className="cert-row-6" style={{ borderBottom: i < formData.instruments.length - 1 ? '1px solid #000' : 'none' }}>
-                                                            <div className="cert-box"><div className="label-top">Instrument</div><div className="content-center">{inst.instrument}</div></div>
-                                                            <div className="cert-box"><div className="label-top">Instrument Capacity</div><div className="content-center">{inst.capacity}</div></div>
-                                                            <div className="cert-box"><div className="label-top">Serial No.</div><div className="content-center">{inst.serialNo}</div></div>
-                                                            <div className="cert-box"><div className="label-top">Data Link</div><div className="content-center">{inst.dataLink}</div></div>
-                                                            <div className="cert-box"><div className="label-top">Accuracy</div><div className="content-center">{inst.accuracy}</div></div>
-                                                            <div className="cert-box"><div className="label-top">Target. Test Load</div><div className="content-center">{inst.targetLoad}</div></div>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        );
-                                        break;
-                                    case 'testTable':
-                                        content = (
-                                            <table className="cert-table">
-                                                <thead>
-                                                    <tr>
-                                                        <th style={{ width: '40px' }}>Item</th>
-                                                        <th>Item Description</th>
-                                                        <th style={{ width: '80px' }}>Local Time</th>
-                                                        <th style={{ width: '80px' }}>Test Dur.</th>
-                                                        <th style={{ width: '100px' }}>Measured Force</th>
-                                                        <th style={{ width: '60px' }}>Accept</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {/* General Equipment Information Row */}
-                                                    <tr>
-                                                        <td></td>
-                                                        <td className="text-left" style={{ paddingBottom: '8px' }}>
-                                                            <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
-                                                                <div><strong style={{ color: '#555' }}>Manufacturer:</strong> {formData.equipmentManufacturer || 'N/A'}</div>
-                                                                <div><strong style={{ color: '#555' }}>S/N:</strong> {formData.equipmentSerial || 'N/A'}</div>
-                                                                <div><strong style={{ color: '#555' }}>WLL:</strong> {formData.equipmentWll || 'N/A'}</div>
-                                                            </div>
-                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
-                                                            {formData.hasAuxHook && (
-                                                                <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Auxiliary Hook WLL:</strong> {formData.auxHookWll || 'N/A'}</div>
-                                                            )}
-                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
-                                                                <strong>Procedure Summary:</strong><br />
-                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
-                                                                    {formData.procedureSummary}
-                                                                </div>
-                                                            </div>
-                                                        </td>
-                                                        <td></td>
-                                                        <td></td>
-                                                        <td></td>
-                                                        <td></td>
-                                                    </tr>
-
-                                                    {/* Test Record Rows */}
-                                                    {formData.tests
-                                                        .slice(0, parseInt(formData.numTests))
-                                                        .map((test, index) => (
-                                                            <tr key={index}>
-                                                                <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
-                                                                <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
-                                                                    <div className="font-bold" style={{ fontSize: '0.95rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
-                                                                        {test.itemDescription || formData.equipmentTested}
-                                                                    </div>
-                                                                    <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
-                                                                        <strong>Hook:</strong> {test.hookTested || 'Main Hook'} | <strong>Type:</strong> {test.loadType}
-                                                                    </div>
-                                                                    <div className="font-bold" style={{ marginTop: '4px', color: '#1a3a6c', fontSize: '0.8rem' }}>
-                                                                        TEST LOAD: {test.wllPercentage || '100%'} WLL
-                                                                    </div>
-                                                                </td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.localTime}</td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.testDuration}</td>
-                                                                <td className="force-val" style={{ fontSize: '1rem', verticalAlign: 'middle', paddingTop: '8px' }}>{test.measuredForce} lbs</td>
-                                                                <td className="accept-val" style={{ color: test.testResults === 'PASS' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
-                                                            </tr>
-                                                        ))}
-                                                </tbody>
-                                            </table>
-                                        );
-                                        break;
-                                    default:
-                                        return null;
-                                }
-                                if (!content) return null;
-                                return <div key={sectionId}>{content}</div>;
-                            })}
-                    </div>
-
-                    {/* Spacer pushes footer to bottom of page 1 */}
-                    <div style={{ flexGrow: 1 }} />
-
-                    {/* Footer / Signature - always at bottom of page 1 */}
-                    <div style={{ flex: '0 0 auto' }}>
-                        <div className="cert-footer-grid" style={{ marginTop: '8px' }}>
-                            <div className="cert-box">
-                                <div className="label-top">Project Manager:</div>
-                                <div className="content-val">{formData.projectMgr}</div>
-                            </div>
-                            <div className="cert-box">
-                                <div className="label-top">Date:</div>
-                                <div className="content-val">{formData.testDate}</div>
-                            </div>
-                            <div className="cert-box signature-row">
-                                <div className="label-top">Signature:</div>
-                                <div className="signature-font">{formData.projectMgr}</div>
-                            </div>
-                            <div className="cert-box">
-                                <div className="label-top">Test Results:</div>
-                                <div className="content-val font-bold">{formData.testResults}</div>
-                            </div>
-                        </div>
-                        <div style={{ marginTop: '4px', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
-                            Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
-                        </div>
-                    </div>
-=======
                 <div className="certificate-paper" style={{ paddingLeft: '44px' }}>
                     {(() => {
                         const sections = formData.sectionOrder || ['header', 'infoGrid', 'testTable', 'footer', 'graphs', 'photos'];
@@ -2795,7 +2575,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             </>
                         );
                     })()}
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                 </div>
 
                 {/* Remaining pages: Graphs and Photos */}
@@ -3274,15 +3053,9 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <label>Duration (min)</label>
                             <input
                                 list={`duration-suggestions-${index}`}
-<<<<<<< HEAD
                                 value={test.testDuration || ''}
                                 onChange={(e) => handleTestInput(index, 'testDuration', e.target.value)}
-                                placeholder="Enter duration..."
-=======
-                                value={test.testDuration}
-                                onChange={(e) => handleTestInput(index, 'testDuration', e.target.value)}
                                 placeholder="Select or type duration..."
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                             />
                             <datalist id={`duration-suggestions-${index}`}>
                                 <option value="5 minutes" />
@@ -3377,11 +3150,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [showRecoveryPrompt, setShowRecoveryPrompt] = useState(false);
     const [isCertPreview, setIsCertPreview] = useState(false);
     const [displayUnit, setDisplayUnit] = useState('lbs');
-<<<<<<< HEAD
     const [displayTimeUnit, setDisplayTimeUnit] = useState('min');
-=======
     const [xUnit, setXUnit] = useState('min');
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
 
     // --- Lifted Live Telemetry & Logging State ---
     const [devices, setDevices] = useState({}); // tag -> latest packet
@@ -3768,20 +3538,13 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')}>Settings</button>
                     </div>
                 )}
-<<<<<<< HEAD
                 <div className="content-area" style={isCertPreview ? { padding: 0, margin: 0, overflowY: 'auto' } : {}}>
-=======
-                <div className="content-area" style={isCertPreview ? { padding: 0, margin: 0 } : {}}>
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                     {activeTab === 'welcome' && (
                         <WelcomeView
                             onJobSelected={(job) => {
                                 setSelectedSharePointJob(job);
-<<<<<<< HEAD
-=======
                                 const existingJob = allJobs.find(j => j.metadata?.jobNumber === job.QuoteNum);
                                 setActiveJobId(existingJob ? existingJob.id : null);
->>>>>>> bdb7183 (Update certificate navigation, print formatting, and shipment categorization)
                                 setActiveTab('cert');
                             }}
                             onOpenSettings={() => setActiveTab('settings')}
