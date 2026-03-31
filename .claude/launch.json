@@ -18,6 +18,13 @@
       "runtimeExecutable": "C:\\Program Files\\nodejs\\node.exe",
       "runtimeArgs": ["run", "preview"],
       "port": 4173
+    },
+    {
+      "name": "Pool Pro Leads",
+      "runtimeExecutable": "C:\\Program Files\\nodejs\\node.exe",
+      "runtimeArgs": ["node_modules/vite/bin/vite.js"],
+      "port": 5174,
+      "cwd": "pool-pro-leads"
     }
   ]
 }

@@ -7,9 +7,16 @@ const HID = require('node-hid');
 const { PublicClientApplication } = require('@azure/msal-node');
 const axios = require('axios');
 const XLSX = require('xlsx-js-style');
-
-const VID = 0x1781;
-const PID = 0x0ba4;
+const {
+    T24_VID, T24_PID, HID_BUFFER_SIZE,
+    REPORT_ID_POLL, REPORT_ID_CONTROL, REPORT_ID_DATA,
+    CMD_STAY_AWAKE, CMD_WAKE_UP, CMD_REQUEST_DATA,
+    BROADCAST_ADDR, DATA_TAG_OFFSET, WEIGHT_VALUE_OFFSET, MIN_PACKET_LENGTH,
+    WAKE_BURST_COUNT, WAKE_BURST_INTERVAL_MS,
+    KEEP_AWAKE_INTERVAL_MS, POLL_INTERVAL_MS, DEVICE_SCAN_INTERVAL_MS,
+    DEFAULT_GROUP_ID, SMOOTHING_BUFFER_SIZE, MAX_REASONABLE_VALUE,
+    WEIGHT_CONVERSION,
+} = require('./config/hardware');
 
 class T24Reader {
     constructor() {
@@ -25,7 +32,7 @@ class T24Reader {
         this.firstTimestamp = null;
         this.logInterval = 0; // 0 = record every packet
         this.lastLoggedTimestamps = new Map(); // Tag -> Last Log Time
-        this.groupId = 0; // Default Group ID = 0 (will be loaded from settings)
+        this.groupId = DEFAULT_GROUP_ID; // Will be loaded from settings
         this.scaleFactors = new Map(); // Tag -> Scale Factor (default 1.0)
         this.sampleBuffers = new Map(); // Tag -> Array of last N samples
         // Default calibration to prevent massive readings if file fails to load
@@ -109,30 +116,58 @@ class T24Reader {
         const burstTimer = setInterval(() => {
             this.sendWakeBroadcast();
             burstCount++;
-            if (burstCount >= 50) clearInterval(burstTimer); // 5 seconds of aggressive wake
-        }, 100);
+            if (burstCount >= WAKE_BURST_COUNT) clearInterval(burstTimer);
+        }, WAKE_BURST_INTERVAL_MS);
 
         if (this.keepAwakeTimer) return;
 
         console.log('Starting T24 Telemetry Maintenance pulse (65-byte buffers)...');
 
-        // 2. Continuous Maintenance
+        // 2. Continuous Maintenance — send both Stay Awake AND Wake Up to all groups
         this.keepAwakeTimer = setInterval(() => {
             if (this.device) {
                 try {
-                    // Stay Awake Broadcast (Report 5, Cmd 1, Group ID in byte 4)
-                    const stayAwake = Buffer.alloc(65);
-                    stayAwake[0] = 0x05;
-                    stayAwake[1] = 0x01;
-                    stayAwake[2] = 0xFF;
-                    stayAwake[3] = 0xFF;
-                    stayAwake[4] = this.groupId; // Set Group ID
+                    // Stay Awake Broadcast (current group)
+                    const stayAwake = Buffer.alloc(HID_BUFFER_SIZE);
+                    stayAwake[0] = REPORT_ID_CONTROL;
+                    stayAwake[1] = CMD_STAY_AWAKE;
+                    stayAwake[2] = BROADCAST_ADDR;
+                    stayAwake[3] = BROADCAST_ADDR;
+                    stayAwake[4] = this.groupId;
                     this.device.write(stayAwake);
+
+                    // Also send Wake Up command (some handhelds need this to stay active)
+                    const wakeUp = Buffer.alloc(HID_BUFFER_SIZE);
+                    wakeUp[0] = REPORT_ID_CONTROL;
+                    wakeUp[1] = CMD_WAKE_UP;
+                    wakeUp[2] = BROADCAST_ADDR;
+                    wakeUp[3] = BROADCAST_ADDR;
+                    wakeUp[4] = this.groupId;
+                    this.device.write(wakeUp);
+
+                    // Send to Group 0 as well if not already on Group 0
+                    if (this.groupId !== DEFAULT_GROUP_ID) {
+                        const stayGlobal = Buffer.alloc(HID_BUFFER_SIZE);
+                        stayGlobal[0] = REPORT_ID_CONTROL;
+                        stayGlobal[1] = CMD_STAY_AWAKE;
+                        stayGlobal[2] = BROADCAST_ADDR;
+                        stayGlobal[3] = BROADCAST_ADDR;
+                        stayGlobal[4] = DEFAULT_GROUP_ID;
+                        this.device.write(stayGlobal);
+
+                        const wakeGlobal = Buffer.alloc(HID_BUFFER_SIZE);
+                        wakeGlobal[0] = REPORT_ID_CONTROL;
+                        wakeGlobal[1] = CMD_WAKE_UP;
+                        wakeGlobal[2] = BROADCAST_ADDR;
+                        wakeGlobal[3] = BROADCAST_ADDR;
+                        wakeGlobal[4] = DEFAULT_GROUP_ID;
+                        this.device.write(wakeGlobal);
+                    }
                 } catch (err) {
                     console.error('Stay-awake failed:', err);
                 }
             }
-        }, 1500); // Pulse every 1.5s
+        }, KEEP_AWAKE_INTERVAL_MS);
     }
 
     manualWake() {
@@ -143,26 +178,26 @@ class T24Reader {
             // Send to selected group
             this.sendWakeBroadcast(this.groupId);
             // Also send to Group 0 (Global Wake) just in case
-            if (this.groupId !== 0) {
-                this.sendWakeBroadcast(0);
+            if (this.groupId !== DEFAULT_GROUP_ID) {
+                this.sendWakeBroadcast(DEFAULT_GROUP_ID);
             }
             burstCount++;
-            if (burstCount >= 50) {
+            if (burstCount >= WAKE_BURST_COUNT) {
                 clearInterval(burstTimer);
                 console.log('Manual wake burst complete.');
             }
-        }, 100);
+        }, WAKE_BURST_INTERVAL_MS);
     }
 
     sendWakeBroadcast(groupId = this.groupId) {
         if (!this.device) return;
         try {
-            // Wake Up Broadcast (Report 5, Cmd 2, Group ID in byte 4)
-            const wake = Buffer.alloc(65);
-            wake[0] = 0x05;
-            wake[1] = 0x02;
-            wake[2] = 0xFF;
-            wake[3] = 0xFF;
+            // Wake Up Broadcast
+            const wake = Buffer.alloc(HID_BUFFER_SIZE);
+            wake[0] = REPORT_ID_CONTROL;
+            wake[1] = CMD_WAKE_UP;
+            wake[2] = BROADCAST_ADDR;
+            wake[3] = BROADCAST_ADDR;
             wake[4] = groupId;
             this.device.write(wake);
         } catch (e) { }
@@ -180,14 +215,19 @@ class T24Reader {
         this.pollTags = tags.filter(t => t !== null);
         if (this.pollTags.length === 0) return;
 
-        console.log(`Starting active polling for tags: ${this.pollTags.join(', ')}`);
+        // Also poll all previously discovered tags so they stay active and visible
+        const allKnownTags = new Set([...this.pollTags, ...this.lastValues.keys()]);
+
+        console.log(`Starting active polling for tags: ${[...allKnownTags].join(', ')}`);
         this.pollTimer = setInterval(() => {
             if (!this.device) return;
-            this.pollTags.forEach(tag => {
+            // Re-check for newly discovered tags each interval
+            const currentTags = new Set([...this.pollTags, ...this.lastValues.keys()]);
+            currentTags.forEach(tag => {
                 try {
-                    const pollPacket = Buffer.alloc(65);
-                    pollPacket[0] = 0x01; // Report ID
-                    pollPacket[1] = 0x03; // Command: Request Data
+                    const pollPacket = Buffer.alloc(HID_BUFFER_SIZE);
+                    pollPacket[0] = REPORT_ID_POLL;
+                    pollPacket[1] = CMD_REQUEST_DATA;
                     pollPacket[2] = parseInt(tag.slice(0, 2), 16);
                     pollPacket[3] = parseInt(tag.slice(2, 4), 16);
                     this.device.write(pollPacket);
@@ -195,7 +235,7 @@ class T24Reader {
                     console.error('Polling error:', err);
                 }
             });
-        }, 500); // Increased frequency to 500ms
+        }, POLL_INTERVAL_MS);
     }
 
     stopPolling() {
@@ -259,13 +299,14 @@ class T24Reader {
         // Byte 4-5: Data Tag (Uint16, Big Endian)
         // Byte 8-11: Weight Value (Float32, Big Endian, in Metric Tonnes)
 
-        if (data.length < 12) return;
+        if (data.length < MIN_PACKET_LENGTH) return;
 
-        // CRITICAL: Only process Report ID 0x0B (Data Provider packets)
-        if (data[0] !== 0x0B) return;
+
+        // CRITICAL: Only process Data Provider packets
+        if (data[0] !== REPORT_ID_DATA) return;
 
         try {
-            const dataTag = data.readUInt16BE(4);
+            const dataTag = data.readUInt16BE(DATA_TAG_OFFSET);
             const tagHex = dataTag.toString(16).toUpperCase().padStart(4, '0');
 
             const config = this.calibrationConfig[tagHex] || {};
@@ -273,9 +314,9 @@ class T24Reader {
 
             let tonnes;
             if (useFloatLE) {
-                tonnes = data.readFloatLE(8);
+                tonnes = data.readFloatLE(WEIGHT_VALUE_OFFSET);
             } else {
-                tonnes = data.readFloatBE(8);
+                tonnes = data.readFloatBE(WEIGHT_VALUE_OFFSET);
             }
 
             let value;
@@ -283,7 +324,7 @@ class T24Reader {
             if (config.skipTonnesConversion) {
                 value = tonnes; // Use raw float
             } else {
-                value = tonnes * 2204.62262; // Convert Metric Tonnes to LBS
+                value = tonnes * WEIGHT_CONVERSION.TONNES_TO_LBS; // Convert Metric Tonnes to LBS
             }
 
             // Apply Zero Offset if configured
@@ -298,7 +339,7 @@ class T24Reader {
             }
 
             // Sanity check: filter out garbage values (reasonable range: -1M to +1M lbs)
-            if (!isFinite(value) || Math.abs(value) > 1000000) {
+            if (!isFinite(value) || Math.abs(value) > MAX_REASONABLE_VALUE) {
                 console.log(`[T24] Filtered out tag ${tagHex}: value=${value}`);
                 return; // Skip this packet - it contains garbage data
             }
@@ -310,7 +351,7 @@ class T24Reader {
             }
             const buffer = this.sampleBuffers.get(tagHex);
             buffer.push(value);
-            if (buffer.length > 10) buffer.shift(); // Keep last 10 samples
+            if (buffer.length > SMOOTHING_BUFFER_SIZE) buffer.shift();
 
             // Calculate Average
             const sum = buffer.reduce((a, b) => a + b, 0);
@@ -399,7 +440,7 @@ let deviceStatus = 'disconnected';
 function scanForDongle() {
     try {
         const devices = HID.devices();
-        const info = devices.find(d => d.vendorId === VID && d.productId === PID);
+        const info = devices.find(d => d.vendorId === T24_VID && d.productId === T24_PID);
         const newStatus = info ? 'connected' : 'disconnected';
 
         if (newStatus !== deviceStatus) {
@@ -423,8 +464,8 @@ function scanForDongle() {
     }
 }
 
-// Start scanning every 2 seconds
-setInterval(scanForDongle, 2000);
+// Start scanning for T24 dongle
+setInterval(scanForDongle, DEVICE_SCAN_INTERVAL_MS);
 
 async function handleSavePDF(event, title) {
     const { filePath } = await dialog.showSaveDialog({
@@ -538,6 +579,30 @@ function getDataPath(filename) {
 }
 
 // --- Settings Management ---
+// Keys that contain sensitive credentials — encrypted with safeStorage
+const SENSITIVE_KEYS = ['openaiKey', 'chrPassword', 'geotabPassword'];
+
+function encryptValue(value) {
+    if (!value || !safeStorage.isEncryptionAvailable()) return value;
+    try {
+        return safeStorage.encryptString(value).toString('base64');
+    } catch (e) {
+        console.error('Failed to encrypt value:', e);
+        return value;
+    }
+}
+
+function decryptValue(value) {
+    if (!value || !safeStorage.isEncryptionAvailable()) return value;
+    try {
+        const buffer = Buffer.from(value, 'base64');
+        return safeStorage.decryptString(buffer);
+    } catch (e) {
+        // Value may not be encrypted yet (pre-migration) — return as-is
+        return value;
+    }
+}
+
 function loadSettings() {
     const settingsPath = getDataPath('settings.json');
     let saved = {};
@@ -556,7 +621,7 @@ function loadSettings() {
         sharepointSite: 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles',
         leadListName: 'Lead List',
         openaiKey: process.env.OPENAI_API_KEY || '',
-        t24GroupId: 0,
+        t24GroupId: DEFAULT_GROUP_ID,
         t24ScaleFactors: {},
         // C.H. Robinson Navisphere credentials
         chrUsername: '',
@@ -570,6 +635,14 @@ function loadSettings() {
 
     // Return defaults merged with saved user settings
     const merged = { ...defaults, ...saved };
+
+    // Decrypt sensitive fields
+    for (const key of SENSITIVE_KEYS) {
+        if (merged[key]) {
+            merged[key] = decryptValue(merged[key]);
+        }
+    }
+
     console.log('[Geotab Debug] loadSettings merged result:', {
         server: merged.geotabServer,
         database: merged.geotabDatabase,
@@ -581,7 +654,15 @@ function loadSettings() {
 
 function saveSettings(event, settings) {
     const settingsPath = getDataPath('settings.json');
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+
+    // Encrypt sensitive fields before writing to disk
+    const toSave = { ...settings };
+    for (const key of SENSITIVE_KEYS) {
+        if (toSave[key]) {
+            toSave[key] = encryptValue(toSave[key]);
+        }
+    }
+    fs.writeFileSync(settingsPath, JSON.stringify(toSave, null, 2));
 
     // Apply Group ID to T24Reader immediately
     if (settings.t24GroupId !== undefined) {
