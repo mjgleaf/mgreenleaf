@@ -6,16 +6,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openFile: () => ipcRenderer.invoke('dialog:openFile'),
     saveData: (data, filename) => ipcRenderer.invoke('storage:save', data, filename),
     loadData: (filename) => ipcRenderer.invoke('storage:load', filename),
-    onDeviceStatusChanged: (callback) => {
-        const handler = (_event, value) => callback(value);
-        ipcRenderer.on('device-status-changed', handler);
-        return () => ipcRenderer.removeListener('device-status-changed', handler);
-    },
-    onLiveData: (callback) => {
-        const handler = (_event, value) => callback(value);
-        ipcRenderer.on('live-data-packet', handler);
-        return () => ipcRenderer.removeListener('live-data-packet', handler);
-    },
+    onDeviceStatusChanged: (callback) => ipcRenderer.on('device-status-changed', (_event, value) => callback(value)),
+    onLiveData: (callback) => ipcRenderer.on('live-data-packet', (_event, value) => callback(value)),
     savePDF: (title) => ipcRenderer.invoke('storage:savePDF', title),
     saveCSV: (data, defaultName) => ipcRenderer.invoke('storage:saveCSV', data, defaultName),
 
