@@ -7,6 +7,8 @@ const HID = require('node-hid');
 const { PublicClientApplication } = require('@azure/msal-node');
 const axios = require('axios');
 const XLSX = require('xlsx-js-style');
+const CompanionServer = require('./companion-server');
+const AppUpdater = require('./updater');
 const {
     T24_VID, T24_PID, HID_BUFFER_SIZE,
     REPORT_ID_POLL, REPORT_ID_CONTROL, REPORT_ID_DATA,
@@ -35,6 +37,8 @@ class T24Reader {
         this.groupId = DEFAULT_GROUP_ID; // Will be loaded from settings
         this.scaleFactors = new Map(); // Tag -> Scale Factor (default 1.0)
         this.sampleBuffers = new Map(); // Tag -> Array of last N samples
+        this.autoDetectBuffers = new Map(); // Tag -> Array of raw packet buffers for auto-detection
+        this.autoDetectComplete = new Set(); // Tags that have been auto-detected
         // Default calibration to prevent massive readings if file fails to load
         this.calibrationConfig = {};
         this.loadCalibration();
@@ -75,6 +79,98 @@ class T24Reader {
             }
         } catch (err) {
             console.error('[CALIBRATION] Failed to load calibration config:', err);
+            // If parsing failed, the file may be corrupted. Back it up and start fresh.
+            if (err instanceof SyntaxError) {
+                try {
+                    const userDataPath = path.join(app.getPath('userData'), 'calibration.json');
+                    if (fs.existsSync(userDataPath)) {
+                        const backupPath = userDataPath + '.corrupted.' + Date.now();
+                        fs.renameSync(userDataPath, backupPath);
+                        console.warn(`[CALIBRATION] Corrupted config backed up to: ${backupPath}`);
+                    }
+                } catch (backupErr) {
+                    console.error('[CALIBRATION] Failed to backup corrupted config:', backupErr);
+                }
+            }
+        }
+    }
+
+    autoDetectTag(tagHex, samples) {
+        // Try all 4 combinations: BE/LE x raw/tonnes-converted
+        // Pick the one where values are most reasonable for a load cell reading in lbs
+        const combos = [
+            { useFloatLE: false, skipTonnesConversion: false, label: 'BE+tonnes' },
+            { useFloatLE: false, skipTonnesConversion: true, label: 'BE+raw' },
+            { useFloatLE: true, skipTonnesConversion: false, label: 'LE+tonnes' },
+            { useFloatLE: true, skipTonnesConversion: true, label: 'LE+raw' },
+        ];
+
+        let bestCombo = combos[0];
+        let bestScore = Infinity;
+
+        for (const combo of combos) {
+            const values = samples.map(buf => {
+                const raw = combo.useFloatLE
+                    ? buf.readFloatLE(WEIGHT_VALUE_OFFSET)
+                    : buf.readFloatBE(WEIGHT_VALUE_OFFSET);
+                return combo.skipTonnesConversion ? raw : raw * WEIGHT_CONVERSION.TONNES_TO_LBS;
+            });
+
+            // Filter out non-finite values
+            const finite = values.filter(v => isFinite(v));
+            if (finite.length < samples.length * 0.8) continue; // Too many garbage values
+
+            const mean = finite.reduce((a, b) => a + b, 0) / finite.length;
+            const variance = finite.reduce((a, v) => a + (v - mean) ** 2, 0) / finite.length;
+            const absMean = Math.abs(mean);
+
+            // Penalize values outside reasonable range heavily
+            if (absMean > MAX_REASONABLE_VALUE) continue;
+
+            // Scoring: A real load cell in lbs should produce values in a typical range.
+            // Key insight: if the raw float is very small (< 1), it's likely in tonnes
+            // and needs conversion. If it's in the hundreds/thousands, it's already lbs.
+            // We prefer values that land in the "typical load cell lbs" range: 0-50000 lbs.
+            // Penalize values that are suspiciously small (< 1 lbs) — likely wrong unit.
+            let score = absMean + Math.sqrt(variance) * 0.5;
+
+            // If the result is extremely small (< 1 lbs), it's probably in the wrong unit
+            // A real lbs reading even unloaded usually has some offset (10+ lbs)
+            if (absMean < 1.0) {
+                score += 10000; // Heavy penalty — this is likely tonnes, not lbs
+            }
+
+            if (score < bestScore) {
+                bestScore = score;
+                bestCombo = combo;
+            }
+        }
+
+        // Build config
+        const config = {};
+        if (bestCombo.skipTonnesConversion) config.skipTonnesConversion = true;
+        if (bestCombo.useFloatLE) config.useFloatLE = true;
+
+        console.log(`[AUTO-DETECT] Tag ${tagHex}: detected ${bestCombo.label} (score: ${bestScore.toFixed(1)})`);
+        console.log(`[AUTO-DETECT] Config for ${tagHex}:`, config);
+
+        // Apply immediately
+        this.calibrationConfig[tagHex] = { ...config, ...(this.calibrationConfig[tagHex] || {}) };
+
+        // Persist to calibration.json
+        this.saveCalibration();
+    }
+
+    saveCalibration() {
+        try {
+            const userDataPath = path.join(app.getPath('userData'), 'calibration.json');
+            const projectRoot = path.resolve(__dirname, '../../');
+            const devPath = path.join(projectRoot, 'config/calibration.json');
+            const savePath = app.isPackaged ? userDataPath : devPath;
+            fs.writeFileSync(savePath, JSON.stringify(this.calibrationConfig, null, 4));
+            console.log(`[CALIBRATION] Saved config to ${savePath}`);
+        } catch (err) {
+            console.error('[CALIBRATION] Failed to save calibration config:', err);
         }
     }
 
@@ -123,7 +219,8 @@ class T24Reader {
 
         console.log('Starting T24 Telemetry Maintenance pulse (65-byte buffers)...');
 
-        // 2. Continuous Maintenance — send both Stay Awake AND Wake Up to all groups
+        // 2. Continuous Maintenance — LOG100-style aggressive keep-awake
+        //    Sends stay-awake + wake-up broadcasts AND direct polls to all known tags
         this.keepAwakeTimer = setInterval(() => {
             if (this.device) {
                 try {
@@ -136,7 +233,7 @@ class T24Reader {
                     stayAwake[4] = this.groupId;
                     this.device.write(stayAwake);
 
-                    // Also send Wake Up command (some handhelds need this to stay active)
+                    // Wake Up broadcast (current group)
                     const wakeUp = Buffer.alloc(HID_BUFFER_SIZE);
                     wakeUp[0] = REPORT_ID_CONTROL;
                     wakeUp[1] = CMD_WAKE_UP;
@@ -163,6 +260,8 @@ class T24Reader {
                         wakeGlobal[4] = DEFAULT_GROUP_ID;
                         this.device.write(wakeGlobal);
                     }
+
+                    // Tag-specific polling is handled by startPolling() separately
                 } catch (err) {
                     console.error('Stay-awake failed:', err);
                 }
@@ -172,6 +271,8 @@ class T24Reader {
 
     manualWake() {
         if (!this.device) return;
+        if (this.manualWakeActive) return; // Prevent overlapping bursts
+        this.manualWakeActive = true;
         console.log('User initiated MANUAL WAKE-UP burst (Global + Selected Group)...');
         let burstCount = 0;
         const burstTimer = setInterval(() => {
@@ -184,6 +285,7 @@ class T24Reader {
             burstCount++;
             if (burstCount >= WAKE_BURST_COUNT) {
                 clearInterval(burstTimer);
+                this.manualWakeActive = false;
                 console.log('Manual wake burst complete.');
             }
         }, WAKE_BURST_INTERVAL_MS);
@@ -259,12 +361,30 @@ class T24Reader {
             this.powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
             console.log(`[T24] Power save blocker started: ${this.powerSaveId}`);
         }
+
+        // Auto-enable keep-awake during logging
+        this.wasKeepAwakeBeforeLog = !!this.keepAwakeTimer;
+        if (!this.keepAwakeTimer) {
+            this.startKeepAwake();
+            console.log('[T24] Auto-enabled keep-awake for logging session.');
+        }
+
+        // Start watchdog: detect silent tags and aggressively wake them
+        this.lastPacketTimes = new Map();
+        this.startWatchdog();
+
         console.log('Safety Log started.');
     }
 
     stopSafetyLog() {
         this.isLogging = false;
         this.firstTimestamp = null;
+        this.stopWatchdog();
+        // Restore keep-awake to previous state
+        if (!this.wasKeepAwakeBeforeLog && this.keepAwakeTimer) {
+            this.stopKeepAwake();
+            console.log('[T24] Auto-disabled keep-awake after logging session.');
+        }
         if (this.powerSaveId !== null) {
             if (powerSaveBlocker.isStarted(this.powerSaveId)) {
                 powerSaveBlocker.stop(this.powerSaveId);
@@ -273,6 +393,85 @@ class T24Reader {
             this.powerSaveId = null;
         }
         console.log('Safety Log stopped.');
+    }
+
+    // LOG100-style watchdog: timer-based logging + aggressive reconnection
+    // Unlike packet-driven logging, this fires on an interval and uses last-known
+    // values when transmitters are silent — matching Mantracourt LOG100 behavior.
+    startWatchdog() {
+        this.stopWatchdog();
+        const SILENT_THRESHOLD_MS = 3000; // 3 seconds = tag considered timed out
+        const WATCHDOG_INTERVAL_MS = 2000; // Check every 2 seconds
+
+        this.watchdogTimer = setInterval(() => {
+            if (!this.isLogging || !this.device) return;
+            const now = Date.now();
+
+            for (const [tag, lastTime] of (this.lastPacketTimes || new Map())) {
+                const silentMs = now - lastTime;
+
+                if (silentMs > SILENT_THRESHOLD_MS) {
+                    // Tag is silent — LOG100 behavior: use default/last-known value
+                    // and aggressively try to wake the transmitter
+
+                    // 1. Wake + poll for the silent tag (one pass to avoid USB flooding)
+                    this.sendWakeBroadcast(this.groupId);
+                    if (this.groupId !== DEFAULT_GROUP_ID) {
+                        this.sendWakeBroadcast(DEFAULT_GROUP_ID);
+                    }
+                    try {
+                        const stayAwake = Buffer.alloc(HID_BUFFER_SIZE);
+                        stayAwake[0] = REPORT_ID_CONTROL;
+                        stayAwake[1] = CMD_STAY_AWAKE;
+                        stayAwake[2] = BROADCAST_ADDR;
+                        stayAwake[3] = BROADCAST_ADDR;
+                        stayAwake[4] = this.groupId;
+                        this.device.write(stayAwake);
+                    } catch (e) { }
+                    try {
+                        const pollPacket = Buffer.alloc(HID_BUFFER_SIZE);
+                        pollPacket[0] = REPORT_ID_POLL;
+                        pollPacket[1] = CMD_REQUEST_DATA;
+                        pollPacket[2] = parseInt(tag.slice(0, 2), 16);
+                        pollPacket[3] = parseInt(tag.slice(2, 4), 16);
+                        this.device.write(pollPacket);
+                    } catch (e) { }
+
+                    // 2. Emit heartbeat with last-known value (LOG100 "Default Value" behavior)
+                    //    This keeps the recording continuous with no gaps
+                    if (this.lastValues.has(tag) && mainWindow && !mainWindow.isDestroyed()) {
+                        let value = this.lastValues.get(tag);
+                        if (this.tares.has(tag)) {
+                            value -= this.tares.get(tag);
+                        }
+                        const heartbeat = {
+                            tag: tag,
+                            value: value,
+                            timestamp: now
+                        };
+                        mainWindow.webContents.send('live-data-packet', heartbeat);
+                        // Forward heartbeat to companion
+                        if (companionServer.isRunning) {
+                            companionServer.sendLiveData(heartbeat);
+                        }
+                    }
+
+                    // Log timeout event periodically (not every second to avoid spam)
+                    if (silentMs % 10000 < WATCHDOG_INTERVAL_MS) {
+                        console.log(`[WATCHDOG] Tag ${tag} timed out (${(silentMs / 1000).toFixed(0)}s) — using last-known value, sending wake commands`);
+                    }
+                }
+            }
+        }, WATCHDOG_INTERVAL_MS);
+        console.log('[WATCHDOG] LOG100-style watchdog started (2s interval, 3s timeout threshold).');
+    }
+
+    stopWatchdog() {
+        if (this.watchdogTimer) {
+            clearInterval(this.watchdogTimer);
+            this.watchdogTimer = null;
+            console.log('[WATCHDOG] Watchdog stopped.');
+        }
     }
 
     clearSafetyLog() {
@@ -308,6 +507,23 @@ class T24Reader {
         try {
             const dataTag = data.readUInt16BE(DATA_TAG_OFFSET);
             const tagHex = dataTag.toString(16).toUpperCase().padStart(4, '0');
+
+            // Auto-detect calibration for unknown tags
+            if (!this.calibrationConfig[tagHex] && !this.autoDetectComplete.has(tagHex)) {
+                if (!this.autoDetectBuffers.has(tagHex)) {
+                    this.autoDetectBuffers.set(tagHex, []);
+                    console.log(`[AUTO-DETECT] New unknown tag ${tagHex}, collecting samples...`);
+                }
+                const buf = this.autoDetectBuffers.get(tagHex);
+                buf.push(Buffer.from(data));
+                if (buf.length >= 10) {
+                    this.autoDetectTag(tagHex, buf);
+                    this.autoDetectComplete.add(tagHex);
+                    this.autoDetectBuffers.delete(tagHex);
+                } else {
+                    return; // Don't emit packets until detection is complete
+                }
+            }
 
             const config = this.calibrationConfig[tagHex] || {};
             const useFloatLE = config.useFloatLE !== undefined ? config.useFloatLE : false; // Default big endian
@@ -387,8 +603,18 @@ class T24Reader {
                 timestamp: Date.now()
             };
 
+            // Track last packet time for watchdog
+            if (this.lastPacketTimes) {
+                this.lastPacketTimes.set(tagHex, Date.now());
+            }
+
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('live-data-packet', packet);
+            }
+
+            // Forward to companion server for mobile phones
+            if (companionServer.isRunning) {
+                companionServer.sendLiveData(packet);
             }
 
             // Persistence: Safety Log (Throttled by interval)
@@ -432,6 +658,7 @@ class T24Reader {
 }
 
 const t24Reader = new T24Reader();
+const companionServer = new CompanionServer();
 let mainWindow;
 let deviceStatus = 'disconnected';
 
@@ -444,15 +671,37 @@ function scanForDongle() {
         const newStatus = info ? 'connected' : 'disconnected';
 
         if (newStatus !== deviceStatus) {
+            const wasLogging = t24Reader.isLogging;
+            const prevPollTags = [...t24Reader.pollTags];
             deviceStatus = newStatus;
-            console.log(`Device status changed: ${deviceStatus} `);
+            console.log(`Device status changed: ${deviceStatus}`);
 
             if (deviceStatus === 'connected') {
                 t24Reader.open(info.path);
                 // Ensure stay-awake is active by default on connection
                 t24Reader.startKeepAwake();
+
+                // Auto-reconnect: resume polling and logging if they were active before disconnect
+                if (prevPollTags.length > 0) {
+                    console.log('[AUTO-RECONNECT] Resuming polling for:', prevPollTags.join(', '));
+                    t24Reader.startPolling(prevPollTags);
+                }
+                if (wasLogging) {
+                    console.log('[AUTO-RECONNECT] Resuming logging session after dongle replug.');
+                    // Re-enable logging state (watchdog, keep-awake, etc.)
+                    t24Reader.isLogging = true;
+                    t24Reader.startWatchdog();
+                }
             } else {
-                t24Reader.close();
+                // Dongle unplugged — close device but DON'T clear logging state
+                // so it can resume on replug
+                t24Reader.stopWatchdog();
+                if (t24Reader.device) {
+                    try { t24Reader.device.close(); } catch (e) { }
+                    t24Reader.device = null;
+                }
+                t24Reader.stopKeepAwake();
+                console.log('[AUTO-RECONNECT] Dongle disconnected. Logging state preserved for reconnect.');
             }
 
             if (mainWindow && !mainWindow.isDestroyed()) {
@@ -507,33 +756,91 @@ async function handleSaveCSV(event, data, defaultName) {
 
     if (filePath) {
         try {
-            // Convert data array to CSV
             if (!data || data.length === 0) {
                 return { success: false, error: 'No data to export' };
             }
 
-            const headers = Object.keys(data[0]);
-            const csvRows = [];
+            // Check if this is multi-tag live data (has Tag and Elapsed fields)
+            const hasMultipleTags = data[0].Tag && data[0]['Elapsed (ms)'] !== undefined;
 
-            // Add header row
-            csvRows.push(headers.join(','));
+            let csvContent;
 
-            // Add data rows
-            for (const row of data) {
-                const values = headers.map(header => {
-                    const val = row[header];
-                    // Escape quotes and wrap in quotes if contains comma or quote
-                    if (val === null || val === undefined) return '';
-                    const str = String(val);
-                    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-                        return `"${str.replace(/"/g, '""')}"`;
+            if (hasMultipleTags) {
+                // Pivot: one row per timestamp, one column per tag
+                const tags = [...new Set(data.map(d => d.Tag))].sort();
+                const timeGroups = new Map(); // elapsed -> { tag -> value, totalLoad }
+
+                for (const row of data) {
+                    const elapsed = row['Elapsed (ms)'];
+                    if (!timeGroups.has(elapsed)) {
+                        timeGroups.set(elapsed, { totalLoad: row['Total Load'] });
                     }
-                    return str;
-                });
-                csvRows.push(values.join(','));
+                    const group = timeGroups.get(elapsed);
+                    group[row.Tag] = row.value;
+                    // Keep the most recent total load for this timestamp
+                    if (row['Total Load'] !== undefined) {
+                        group.totalLoad = row['Total Load'];
+                    }
+                }
+
+                // Build headers
+                const headers = [
+                    'Elapsed (ms)',
+                    'Elapsed (sec)',
+                    ...tags.map(t => `Cell ${t} (lbs)`),
+                    'Total Load (lbs)'
+                ];
+
+                const csvRows = [headers.join(',')];
+
+                // Sort by elapsed time
+                const sortedTimes = [...timeGroups.keys()].sort((a, b) => a - b);
+
+                // Track last known value per tag for filling gaps
+                const lastKnown = {};
+
+                for (const elapsed of sortedTimes) {
+                    const group = timeGroups.get(elapsed);
+                    const row = [
+                        elapsed,
+                        (elapsed / 1000).toFixed(2),
+                    ];
+                    for (const tag of tags) {
+                        if (group[tag] !== undefined) {
+                            lastKnown[tag] = group[tag];
+                            row.push(group[tag].toFixed(2));
+                        } else {
+                            // Carry forward last known value
+                            row.push(lastKnown[tag] !== undefined ? lastKnown[tag].toFixed(2) : '');
+                        }
+                    }
+                    row.push(group.totalLoad !== undefined ? group.totalLoad.toFixed(2) : '');
+                    csvRows.push(row.join(','));
+                }
+
+                csvContent = csvRows.join('\n');
+            } else {
+                // Generic CSV export (non-live data, imports, etc.)
+                const headers = Object.keys(data[0]);
+                const csvRows = [headers.join(',')];
+
+                for (const row of data) {
+                    const values = headers.map(header => {
+                        const val = row[header];
+                        if (val === null || val === undefined) return '';
+                        const str = String(val);
+                        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                            return `"${str.replace(/"/g, '""')}"`;
+                        }
+                        return str;
+                    });
+                    csvRows.push(values.join(','));
+                }
+
+                csvContent = csvRows.join('\n');
             }
 
-            fs.writeFileSync(filePath, csvRows.join('\n'), 'utf-8');
+            fs.writeFileSync(filePath, csvContent, 'utf-8');
             shell.openPath(filePath);
             return { success: true, filePath };
         } catch (error) {
@@ -611,6 +918,14 @@ function loadSettings() {
             saved = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
         } catch (e) {
             console.error('Failed to parse settings:', e);
+            // Back up corrupted settings file
+            if (e instanceof SyntaxError) {
+                try {
+                    const backupPath = settingsPath + '.corrupted.' + Date.now();
+                    fs.renameSync(settingsPath, backupPath);
+                    console.warn(`[SETTINGS] Corrupted settings backed up to: ${backupPath}`);
+                } catch (be) { }
+            }
         }
     }
 
@@ -767,9 +1082,15 @@ async function fetchGeotabVehicles() {
             }
             throw new Error(response.data.error.message);
         }
+        saveGeotabVehiclesCache(response.data.result);
         return { success: true, vehicles: response.data.result };
     } catch (err) {
         console.error('Geotab Vehicles Error:', err.message);
+        const cached = loadGeotabVehiclesCache();
+        if (cached) {
+            console.log('Returning cached Geotab vehicles for offline state.');
+            return { success: true, vehicles: cached.vehicles, cached: true };
+        }
         return { success: false, error: err.message };
     }
 }
@@ -797,9 +1118,15 @@ async function fetchGeotabELD(fromDate, toDate) {
             }
             throw new Error(response.data.error.message);
         }
+        saveGeotabELDCache(response.data.result);
         return { success: true, logs: response.data.result };
     } catch (err) {
         console.error('Geotab ELD Error:', err.message);
+        const cached = loadGeotabELDCache();
+        if (cached) {
+            console.log('Returning cached Geotab ELD data for offline state.');
+            return { success: true, logs: cached.logs, cached: true };
+        }
         return { success: false, error: err.message };
     }
 }
@@ -830,8 +1157,99 @@ function loadJobCache() {
     return null;
 }
 
+// --- Shipments Cache for Offline Use ---
+function saveShipmentsCache(shipments) {
+    const cachePath = getDataPath('shipments-cache.json');
+    const cacheData = {
+        timestamp: new Date().toISOString(),
+        shipments: shipments
+    };
+    fs.writeFileSync(cachePath, JSON.stringify(cacheData, null, 2));
+    console.log(`Shipments cache saved: ${shipments.length} shipments at ${cacheData.timestamp}`);
+}
+
+function loadShipmentsCache() {
+    const cachePath = getDataPath('shipments-cache.json');
+    if (fs.existsSync(cachePath)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+            console.log(`Shipments cache loaded: ${data.shipments?.length || 0} shipments from ${data.timestamp}`);
+            return data;
+        } catch (e) {
+            console.error('Failed to load shipments cache:', e);
+            return null;
+        }
+    }
+    return null;
+}
+
+// --- Geotab Cache for Offline Use ---
+function saveGeotabVehiclesCache(vehicles) {
+    const cachePath = getDataPath('geotab-vehicles-cache.json');
+    const cacheData = {
+        timestamp: new Date().toISOString(),
+        vehicles: vehicles
+    };
+    fs.writeFileSync(cachePath, JSON.stringify(cacheData, null, 2));
+    console.log(`Geotab vehicles cache saved: ${vehicles.length} vehicles`);
+}
+
+function loadGeotabVehiclesCache() {
+    const cachePath = getDataPath('geotab-vehicles-cache.json');
+    if (fs.existsSync(cachePath)) {
+        try {
+            return JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+        } catch (e) {
+            console.error('Failed to load Geotab vehicles cache:', e);
+            return null;
+        }
+    }
+    return null;
+}
+
+function saveGeotabELDCache(logs) {
+    const cachePath = getDataPath('geotab-eld-cache.json');
+    const cacheData = {
+        timestamp: new Date().toISOString(),
+        logs: logs
+    };
+    fs.writeFileSync(cachePath, JSON.stringify(cacheData, null, 2));
+    console.log(`Geotab ELD cache saved: ${logs.length} logs`);
+}
+
+function loadGeotabELDCache() {
+    const cachePath = getDataPath('geotab-eld-cache.json');
+    if (fs.existsSync(cachePath)) {
+        try {
+            return JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+        } catch (e) {
+            console.error('Failed to load Geotab ELD cache:', e);
+            return null;
+        }
+    }
+    return null;
+}
+
 // --- C.H. Robinson Navisphere Integration (Moved to Greens App) ---
 
+function loadCHRTokenCache() {
+    const cachePath = getDataPath('chr-token-cache.json');
+    if (fs.existsSync(cachePath)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+            if (data.accessToken && data.expiry && new Date(data.expiry) > new Date()) {
+                chrAccessToken = data.accessToken;
+                chrRefreshToken = data.refreshToken;
+                chrTokenExpiry = new Date(data.expiry);
+                console.log('CHR token loaded from cache');
+                return true;
+            }
+        } catch (e) {
+            console.error('Failed to load CHR token cache:', e);
+        }
+    }
+    return false;
+}
 
 function saveCHRTokenCache() {
     const cachePath = getDataPath('chr-token-cache.json');
@@ -1655,6 +2073,20 @@ app.whenReady().then(() => {
         return { success: false, error: 'Invalid URL' };
     });
 
+    ipcMain.handle('shell:openBundledDoc', (event, filename) => {
+        // Sanitize: only allow filenames, no path traversal
+        const safeName = path.basename(filename);
+        const isDev = !app.isPackaged;
+        const docPath = isDev
+            ? path.join(__dirname, '..', '..', 'public', 'docs', safeName)
+            : path.join(process.resourcesPath, 'docs', safeName);
+        if (fs.existsSync(docPath)) {
+            shell.openPath(docPath);
+            return { success: true };
+        }
+        return { success: false, error: 'Document not found' };
+    });
+
 
     // Persistence & Recovery
     ipcMain.handle('t24:checkRecovery', () => {
@@ -1696,10 +2128,226 @@ app.whenReady().then(() => {
         t24Reader.stopSafetyLog();
     });
 
+    // ── Session History (Customer Center) ──
+    const sessionsDir = path.join(app.getPath('userData'), 'sessions');
+    if (!fs.existsSync(sessionsDir)) fs.mkdirSync(sessionsDir, { recursive: true });
+
+    ipcMain.handle('sessions:save', (event, { name, data, meta }) => {
+        try {
+            const id = `${Date.now()}-${name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+            const sessionFile = path.join(sessionsDir, `${id}.json`);
+            fs.writeFileSync(sessionFile, JSON.stringify({ name, data, meta, savedAt: new Date().toISOString() }));
+            console.log(`[SESSIONS] Saved session: ${name} (${data.length} samples)`);
+            return { success: true, id };
+        } catch (err) {
+            console.error('[SESSIONS] Save failed:', err);
+            return { success: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('sessions:list', () => {
+        try {
+            const files = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json')).sort().reverse();
+            return files.map(f => {
+                try {
+                    const raw = fs.readFileSync(path.join(sessionsDir, f), 'utf8');
+                    const session = JSON.parse(raw);
+                    return { id: f.replace('.json', ''), name: session.name, savedAt: session.savedAt, meta: session.meta, sampleCount: session.data?.length || 0 };
+                } catch (e) { return null; }
+            }).filter(Boolean);
+        } catch (err) { return []; }
+    });
+
+    ipcMain.handle('sessions:load', (event, id) => {
+        try {
+            const raw = fs.readFileSync(path.join(sessionsDir, `${id}.json`), 'utf8');
+            return JSON.parse(raw);
+        } catch (err) { return null; }
+    });
+
+    ipcMain.handle('sessions:delete', (event, id) => {
+        try {
+            fs.unlinkSync(path.join(sessionsDir, `${id}.json`));
+            return { success: true };
+        } catch (err) { return { success: false }; }
+    });
+
+    // ── Auto-save (periodic temp save during recording) ──
+    ipcMain.handle('sessions:autosave', (event, { name, data, meta }) => {
+        try {
+            const autosaveFile = path.join(sessionsDir, '_autosave.json');
+            fs.writeFileSync(autosaveFile, JSON.stringify({ name, data, meta, savedAt: new Date().toISOString() }));
+            return { success: true };
+        } catch (err) { return { success: false }; }
+    });
+
+    ipcMain.handle('sessions:loadAutosave', () => {
+        try {
+            const autosaveFile = path.join(sessionsDir, '_autosave.json');
+            if (!fs.existsSync(autosaveFile)) return null;
+            const raw = fs.readFileSync(autosaveFile, 'utf8');
+            return JSON.parse(raw);
+        } catch (err) { return null; }
+    });
+
+    ipcMain.handle('sessions:clearAutosave', () => {
+        try {
+            const autosaveFile = path.join(sessionsDir, '_autosave.json');
+            if (fs.existsSync(autosaveFile)) fs.unlinkSync(autosaveFile);
+            return { success: true };
+        } catch (err) { return { success: false }; }
+    });
+
+    // ── Companion Server (Mobile PWA) ──
+    ipcMain.handle('companion:start', async () => {
+        try {
+            const result = await companionServer.start();
+            return { success: true, port: result.port, ips: result.ips };
+        } catch (err) {
+            console.error('[COMPANION] Start failed:', err);
+            return { success: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('companion:stop', async () => {
+        try {
+            await companionServer.stop();
+            return { success: true };
+        } catch (err) {
+            return { success: false, error: err.message };
+        }
+    });
+
+    ipcMain.handle('companion:status', () => {
+        return companionServer.getStatus();
+    });
+
+    ipcMain.handle('companion:getPhotos', () => {
+        return companionServer.getPhotos();
+    });
+
+    ipcMain.handle('companion:clearPhotos', () => {
+        companionServer.clearPhotos();
+        return { success: true };
+    });
+
+    // When a phone sends a photo, notify the renderer
+    companionServer.onPhotoReceived = (photo) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('companion-photo-received', photo);
+        }
+    };
+
+    // ── Certificate Registry (Auto-Numbering) ──
+    const certRegistryPath = path.join(app.getPath('userData'), 'cert-registry.json');
+
+    const loadCertRegistry = () => {
+        try {
+            if (fs.existsSync(certRegistryPath)) {
+                return JSON.parse(fs.readFileSync(certRegistryPath, 'utf8'));
+            }
+        } catch (e) { console.error('[CERT-REGISTRY] Load failed:', e); }
+        return { lastNumber: 0, certs: [] };
+    };
+
+    const saveCertRegistry = (registry) => {
+        try {
+            fs.writeFileSync(certRegistryPath, JSON.stringify(registry, null, 2));
+        } catch (e) { console.error('[CERT-REGISTRY] Save failed:', e); }
+    };
+
+    ipcMain.handle('cert:nextNumber', () => {
+        const registry = loadCertRegistry();
+        const year = new Date().getFullYear();
+        registry.lastNumber = (registry.lastNumber || 0) + 1;
+        const certNo = `HW-${year}-${String(registry.lastNumber).padStart(4, '0')}`;
+        saveCertRegistry(registry);
+        return certNo;
+    });
+
+    ipcMain.handle('cert:register', (event, { certNo, jobName, customer, testDate, template, result }) => {
+        const registry = loadCertRegistry();
+        registry.certs = registry.certs || [];
+        // Avoid duplicates
+        const existing = registry.certs.findIndex(c => c.certNo === certNo);
+        const entry = { certNo, jobName, customer, testDate, template, result, issuedAt: new Date().toISOString() };
+        if (existing >= 0) {
+            registry.certs[existing] = entry;
+        } else {
+            registry.certs.push(entry);
+        }
+        saveCertRegistry(registry);
+        return { success: true };
+    });
+
+    ipcMain.handle('cert:listRegistry', () => {
+        const registry = loadCertRegistry();
+        return registry.certs || [];
+    });
+
+    // ── Export to Customer USB / Folder ──
+    ipcMain.handle('export:customerPackage', async (event, { certPdfTitle, csvData, csvName, sessionName }) => {
+        try {
+            const result = await dialog.showOpenDialog(mainWindow, {
+                title: 'Select Folder for Customer Export',
+                properties: ['openDirectory', 'createDirectory'],
+                buttonLabel: 'Export Here'
+            });
+            if (result.canceled || !result.filePaths.length) return { success: false, canceled: true };
+
+            const exportDir = path.join(result.filePaths[0], sessionName || `OSCAR-Export-${new Date().toISOString().slice(0, 10)}`);
+            if (!fs.existsSync(exportDir)) fs.mkdirSync(exportDir, { recursive: true });
+
+            const files = [];
+
+            // Save PDF certificate if requested
+            if (certPdfTitle && mainWindow) {
+                const pdfData = await mainWindow.webContents.printToPDF({
+                    printBackground: true,
+                    landscape: false,
+                    pageSize: 'Letter'
+                });
+                const pdfPath = path.join(exportDir, `${certPdfTitle}.pdf`);
+                fs.writeFileSync(pdfPath, pdfData);
+                files.push(pdfPath);
+            }
+
+            // Save CSV if provided
+            if (csvData && csvName) {
+                const csvPath = path.join(exportDir, csvName.endsWith('.csv') ? csvName : `${csvName}.csv`);
+                fs.writeFileSync(csvPath, csvData);
+                files.push(csvPath);
+            }
+
+            console.log(`[EXPORT] Customer package saved to: ${exportDir} (${files.length} files)`);
+            return { success: true, path: exportDir, files };
+        } catch (err) {
+            console.error('[EXPORT] Failed:', err);
+            return { success: false, error: err.message };
+        }
+    });
+
+    // ── GPS Location (for session tagging) ──
+    ipcMain.handle('gps:getLocation', async () => {
+        // In Electron, we use the Chromium geolocation API from renderer
+        // This handler is a passthrough for manual coordinate entry if needed
+        return { success: true, note: 'Use navigator.geolocation in renderer' };
+    });
+
     // Initial scan before window creates
     scanForDongle();
 
     createWindow();
+
+    // Auto-updater (after window is created)
+    const appUpdater = new AppUpdater(mainWindow);
+    appUpdater.registerIPC();
+    // Check for updates 5 seconds after launch (non-blocking)
+    setTimeout(() => {
+        if (app.isPackaged) {
+            appUpdater.checkForUpdates();
+        }
+    }, 5000);
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
@@ -1709,6 +2357,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+    companionServer.stop().catch(() => {});
     if (process.platform !== 'darwin') {
         app.quit();
     }

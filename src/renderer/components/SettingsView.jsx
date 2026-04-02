@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { getElectronAPI } from '../utils/electronAPI';
+import { useTheme } from '../App';
 
 function SettingsView({ onSettingsSaved }) {
+    const { theme, toggleTheme } = useTheme();
     const [settings, setSettings] = useState({
         clientId: '',
         tenantId: '',
@@ -35,8 +37,71 @@ function SettingsView({ onSettingsSaved }) {
         }
     };
 
+    const [updateStatus, setUpdateStatus] = useState(null);
+    const [checkingUpdate, setCheckingUpdate] = useState(false);
+
+    // Listen for updater events
+    useEffect(() => {
+        const api = getElectronAPI();
+        if (api.onUpdaterStatus) {
+            const removeListener = api.onUpdaterStatus((status) => {
+                setUpdateStatus(status);
+                setCheckingUpdate(false);
+            });
+            return () => { if (typeof removeListener === 'function') removeListener(); };
+        }
+    }, []);
+
+    const handleCheckUpdate = async () => {
+        setCheckingUpdate(true);
+        setUpdateStatus(null);
+        await getElectronAPI().updaterCheck();
+    };
+
     return (
         <div className="view-container">
+            {/* App Updates & Theme */}
+            <div className="form-section" style={{ marginBottom: '1.5rem' }}>
+                <h3>Appearance & Updates</h3>
+                <div style={{ display: 'flex', gap: '24px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                    <div>
+                        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '6px', display: 'block' }}>Theme</label>
+                        <div className="theme-toggle">
+                            <button className={`theme-toggle-option ${theme === 'light' ? 'active' : ''}`} onClick={toggleTheme}>☀️ Light</button>
+                            <button className={`theme-toggle-option ${theme === 'dark' ? 'active' : ''}`} onClick={toggleTheme}>🌙 Dark</button>
+                        </div>
+                    </div>
+                    <div>
+                        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '6px', display: 'block' }}>Software Updates</label>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <button className="action-btn secondary" onClick={handleCheckUpdate} disabled={checkingUpdate} style={{ fontSize: '0.85rem' }}>
+                                {checkingUpdate ? '⏳ Checking...' : '🔄 Check for Updates'}
+                            </button>
+                            {updateStatus?.status === 'up-to-date' && (
+                                <span style={{ color: '#22c55e', fontSize: '0.85rem' }}>✓ Up to date (v{updateStatus.version})</span>
+                            )}
+                            {updateStatus?.status === 'available' && (
+                                <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <span style={{ color: 'var(--yellow-accent)', fontSize: '0.85rem' }}>v{updateStatus.version} available</span>
+                                    <button className="action-btn primary" onClick={() => getElectronAPI().updaterDownload()} style={{ fontSize: '0.8rem', padding: '4px 12px' }}>Download</button>
+                                </span>
+                            )}
+                            {updateStatus?.status === 'downloading' && (
+                                <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Downloading... {updateStatus.percent}%</span>
+                            )}
+                            {updateStatus?.status === 'downloaded' && (
+                                <button className="action-btn primary" onClick={() => getElectronAPI().updaterInstall()} style={{ fontSize: '0.8rem', padding: '4px 12px' }}>
+                                    🚀 Install & Restart
+                                </button>
+                            )}
+                            {updateStatus?.status === 'error' && (
+                                <span style={{ color: '#ef4444', fontSize: '0.85rem' }}>Update check failed</span>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div className="form-section">
                 <h3>System Settings</h3>
                 <p className="helper-text">Configure SharePoint and AI credentials below.</p>

@@ -42,8 +42,49 @@ contextBridge.exposeInMainWorld('electronAPI', {
     stopSafetyLog: () => ipcRenderer.send('t24:stopSafetyLog'),
     wakeSensors: () => ipcRenderer.invoke('t24:wakeSensors'),
 
+    // Session History
+    saveSession: (payload) => ipcRenderer.invoke('sessions:save', payload),
+    listSessions: () => ipcRenderer.invoke('sessions:list'),
+    loadSession: (id) => ipcRenderer.invoke('sessions:load', id),
+    deleteSession: (id) => ipcRenderer.invoke('sessions:delete', id),
+    autosaveSession: (payload) => ipcRenderer.invoke('sessions:autosave', payload),
+    loadAutosave: () => ipcRenderer.invoke('sessions:loadAutosave'),
+    clearAutosave: () => ipcRenderer.invoke('sessions:clearAutosave'),
+
+    // Companion Server (Mobile PWA)
+    companionStart: () => ipcRenderer.invoke('companion:start'),
+    companionStop: () => ipcRenderer.invoke('companion:stop'),
+    companionStatus: () => ipcRenderer.invoke('companion:status'),
+    companionGetPhotos: () => ipcRenderer.invoke('companion:getPhotos'),
+    companionClearPhotos: () => ipcRenderer.invoke('companion:clearPhotos'),
+    onCompanionPhoto: (callback) => {
+        const handler = (_event, value) => callback(value);
+        ipcRenderer.on('companion-photo-received', handler);
+        return () => ipcRenderer.removeListener('companion-photo-received', handler);
+    },
+
+    // Certificate Registry
+    certNextNumber: () => ipcRenderer.invoke('cert:nextNumber'),
+    certRegister: (entry) => ipcRenderer.invoke('cert:register', entry),
+    certListRegistry: () => ipcRenderer.invoke('cert:listRegistry'),
+
+    // Customer Export
+    exportCustomerPackage: (opts) => ipcRenderer.invoke('export:customerPackage', opts),
+
+    // Auto-Updater
+    updaterCheck: () => ipcRenderer.invoke('updater:check'),
+    updaterDownload: () => ipcRenderer.invoke('updater:download'),
+    updaterInstall: () => ipcRenderer.invoke('updater:install'),
+    updaterStatus: () => ipcRenderer.invoke('updater:status'),
+    onUpdaterStatus: (callback) => {
+        const handler = (_event, value) => callback(value);
+        ipcRenderer.on('updater-status', handler);
+        return () => ipcRenderer.removeListener('updater-status', handler);
+    },
+
     // Utilities
     openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+    openBundledDoc: (filename) => ipcRenderer.invoke('shell:openBundledDoc', filename),
 
     // C.H. Robinson Navisphere
     fetchCHRShipments: () => ipcRenderer.invoke('chr:fetchShipments'),

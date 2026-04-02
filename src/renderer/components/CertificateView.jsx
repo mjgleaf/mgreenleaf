@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import processChartData from '../utils/processChartData';
 import { getElectronAPI } from '../utils/electronAPI';
+import { SignaturePad } from './CustomerView';
 import StandardFinder from './StandardFinder';
 import logo from '../logo.png';
 
@@ -110,12 +111,40 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         hasAuxHook: false,
         auxHookWll: '',
         graphPageBreaks: {}, // { dataSetIndex: boolean }
-        sectionOrder: ['header', 'infoGrid', 'testTable', 'footer', 'graphs', 'photos']
+        sectionOrder: ['header', 'infoGrid', 'testTable', 'footer', 'graphs', 'photos'],
+        // Spreader Beam fields
+        beamLength: '',
+        beamManufacturer: '',
+        beamSerial: '',
+        beamWll: '',
+        numPickPoints: 2,
+        pickPoints: Array(6).fill(null).map((_, i) => ({
+            label: `Pick Point ${i + 1}`,
+            position: '',
+            measuredForce: '',
+            accept: 'YES'
+        })),
+        spreaderTests: Array(10).fill(null).map(() => ({
+            loadType: 'Static',
+            wllPercentage: '100%',
+            testDuration: '',
+            localTime: null,
+            accept: 'YES',
+            testResults: 'PASS',
+            itemDescription: '',
+            pickPointData: Array(6).fill(null).map(() => ({
+                measuredForce: '',
+                accept: 'YES'
+            }))
+        }))
     });
 
     const [isPreview, setIsPreview] = useState(false);
     const [showAiWizard, setShowAiWizard] = useState(false);
     const [certLayout, setCertLayout] = useState('crane-hook');
+    const [showSignaturePad, setShowSignaturePad] = useState(false);
+    const [customerSignature, setCustomerSignature] = useState(null);
+    const [certRegistry, setCertRegistry] = useState([]);
 
     // --- Drag-and-Drop Section Reordering ---
     const dragItem = useRef(null);
@@ -176,18 +205,15 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
     useEffect(() => {
         const load = async () => {
-            const saved = await getElectronAPI().loadData('cert-info.json');
-
             setFormData(prev => {
                 let current = { ...prev };
 
-                // 1. Try Loading from job-specific metadata first
+                // Only load saved data if we have a specific job context
                 if (job?.metadata?.certData) {
+                    // 1. Load from job-specific metadata
                     current = { ...current, ...job.metadata.certData };
-                } else if (saved) {
-                    // 2. Fall back to global scratchpad (cert-info.json)
-                    current = { ...current, ...saved };
                 }
+                // No job selected = start with a blank form
 
                 // Ensure we have at least 10 test slots even if old data had fewer
                 if (current.tests && current.tests.length < 10) {
@@ -282,10 +308,9 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         newInstruments[index] = { ...newInstruments[index], [name]: value };
         const newFormData = { ...formData, instruments: newInstruments };
         setFormData(newFormData);
-        if (onUpdateMetadata) {
+        if (onUpdateMetadata && jobId) {
             onUpdateMetadata(jobId, { certData: newFormData });
         }
-        getElectronAPI().saveData(newFormData, 'cert-info.json');
     };
 
     const addInstrument = () => {
@@ -313,7 +338,9 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         const { name, value } = e.target;
         const newFormData = { ...formData, [name]: value };
         setFormData(newFormData);
-        getElectronAPI().saveData(newFormData, 'cert-info.json');
+        if (onUpdateMetadata && jobId) {
+            onUpdateMetadata(jobId, { certData: newFormData });
+        }
     };
 
     const handleTestInput = (index, name, value) => {
@@ -321,7 +348,36 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         newTests[index] = { ...newTests[index], [name]: value };
         const newFormData = { ...formData, tests: newTests };
         setFormData(newFormData);
-        getElectronAPI().saveData(newFormData, 'cert-info.json');
+        if (onUpdateMetadata && jobId) {
+            onUpdateMetadata(jobId, { certData: newFormData });
+        }
+    };
+
+    // Spreader Beam handlers
+    const handlePickPointInput = (ppIndex, field, value) => {
+        const newPickPoints = [...formData.pickPoints];
+        newPickPoints[ppIndex] = { ...newPickPoints[ppIndex], [field]: value };
+        const newFormData = { ...formData, pickPoints: newPickPoints };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const handleSpreaderTestInput = (testIndex, field, value) => {
+        const newTests = [...formData.spreaderTests];
+        newTests[testIndex] = { ...newTests[testIndex], [field]: value };
+        const newFormData = { ...formData, spreaderTests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const handleSpreaderPickPointData = (testIndex, ppIndex, field, value) => {
+        const newTests = [...formData.spreaderTests];
+        const newPPData = [...newTests[testIndex].pickPointData];
+        newPPData[ppIndex] = { ...newPPData[ppIndex], [field]: value };
+        newTests[testIndex] = { ...newTests[testIndex], pickPointData: newPPData };
+        const newFormData = { ...formData, spreaderTests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
 
     const toggleGraphPageBreak = (datasetIdx) => {
@@ -335,7 +391,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             if (onUpdateMetadata) {
                 onUpdateMetadata(jobId, { certData: newFormData });
             }
-            getElectronAPI().saveData(newFormData, 'cert-info.json');
             return newFormData;
         });
     };
@@ -400,7 +455,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             if (onUpdateMetadata) {
                 onUpdateMetadata(jobId, { certData: newFormData });
             }
-            getElectronAPI().saveData(newFormData, 'cert-info.json');
             return newFormData;
         });
     };
@@ -448,6 +502,17 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
     const finalizePDF = async () => {
         await getElectronAPI().savePDF(`Certificate_${formData.certNo || 'Draft'}`);
+        // Register certificate in registry
+        if (formData.certNo && getElectronAPI().certRegister) {
+            await getElectronAPI().certRegister({
+                certNo: formData.certNo,
+                jobName: selectedJob?.JobName || '',
+                customer: formData.soldTo,
+                testDate: formData.testDate,
+                template: certLayout,
+                result: formData.testResults
+            });
+        }
     };
 
     const showPreview = () => {
@@ -470,11 +535,25 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         <button onClick={() => { setIsPreview(false); if (onPreviewModeChange) onPreviewModeChange(false); }} className="action-btn secondary" style={{ fontWeight: 'bold', border: '2px solid' }}>
                             ← EXIT PREVIEW (Back to Editor)
                         </button>
+                        <button onClick={() => setShowSignaturePad(true)} className="action-btn secondary">
+                            ✍️ {customerSignature ? 'Re-sign' : 'Customer Signature'}
+                        </button>
                         <button onClick={finalizePDF} className="action-btn" style={{ background: '#1a3a6c' }}>
                             💾 Finalize & Save PDF
                         </button>
                     </div>
                 </div>
+
+                {/* Signature Pad Modal */}
+                {showSignaturePad && (
+                    <SignaturePad
+                        onSave={(dataUrl) => {
+                            setCustomerSignature(dataUrl);
+                            setShowSignaturePad(false);
+                        }}
+                        onClose={() => setShowSignaturePad(false)}
+                    />
+                )}
                 <div className="certificate-paper" style={{ paddingLeft: '44px' }}>
                     {(() => {
                         const sections = formData.sectionOrder || ['header', 'infoGrid', 'testTable', 'footer', 'graphs', 'photos'];
@@ -546,69 +625,139 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     );
                                     break;
                                 case 'testTable':
-                                    content = (
-                                        <table className="cert-table">
-                                            <thead>
-                                                <tr>
-                                                    <th style={{ width: '40px' }}>Item</th>
-                                                    <th>Item Description</th>
-                                                    <th style={{ width: '80px' }}>Local Time</th>
-                                                    <th style={{ width: '80px' }}>Test Dur.</th>
-                                                    <th style={{ width: '100px' }}>Measured Force</th>
-                                                    <th style={{ width: '60px' }}>Accept</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                <tr>
-                                                    <td></td>
-                                                    <td className="text-left" style={{ paddingBottom: '8px' }}>
-                                                        <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
-                                                            <div><strong style={{ color: '#555' }}>Manufacturer:</strong> {formData.equipmentManufacturer || 'N/A'}</div>
-                                                            <div><strong style={{ color: '#555' }}>S/N:</strong> {formData.equipmentSerial || 'N/A'}</div>
-                                                            <div><strong style={{ color: '#555' }}>WLL:</strong> {formData.equipmentWll || 'N/A'}</div>
-                                                            <div><strong style={{ color: '#555' }}>Target Test Load:</strong> {formData.targetLoad || 'N/A'}</div>
-                                                        </div>
-                                                        <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
-                                                        {formData.hasAuxHook && (
-                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Auxiliary Hook WLL:</strong> {formData.auxHookWll || 'N/A'}</div>
-                                                        )}
-                                                        <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
-                                                            <strong>Procedure Summary:</strong><br />
-                                                            <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
-                                                                {formData.procedureSummary}
+                                    if (certLayout === 'spreader-beam') {
+                                        const numPP = parseInt(formData.numPickPoints) || 2;
+                                        content = (
+                                            <table className="cert-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th style={{ width: '35px' }}>Item</th>
+                                                        <th>Description</th>
+                                                        <th style={{ width: '65px' }}>Time</th>
+                                                        <th style={{ width: '65px' }}>Dur.</th>
+                                                        {formData.pickPoints.slice(0, numPP).map((pp, i) => (
+                                                            <th key={i} style={{ width: '85px', fontSize: '0.65rem' }}>{pp.label || `PP ${i+1}`}</th>
+                                                        ))}
+                                                        <th style={{ width: '50px' }}>Accept</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr>
+                                                        <td></td>
+                                                        <td className="text-left" colSpan={3 + numPP} style={{ paddingBottom: '8px' }}>
+                                                            <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <div><strong style={{ color: '#555' }}>Beam Manufacturer:</strong> {formData.beamManufacturer || formData.equipmentManufacturer || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>Beam S/N:</strong> {formData.beamSerial || formData.equipmentSerial || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>Beam Length:</strong> {formData.beamLength || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>Beam WLL:</strong> {formData.beamWll || formData.equipmentWll || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>Target Test Load:</strong> {formData.targetLoad || 'N/A'}</div>
                                                             </div>
-                                                        </div>
-                                                    </td>
-                                                    <td></td>
-                                                    <td></td>
-                                                    <td></td>
-                                                    <td></td>
-                                                </tr>
-                                                {formData.tests
-                                                    .slice(0, parseInt(formData.numTests))
-                                                    .map((test, index) => (
-                                                        <tr key={index}>
-                                                            <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
-                                                            <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
-                                                                <div className="font-bold" style={{ fontSize: '0.95rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
-                                                                    {test.itemDescription || formData.equipmentTested}
+                                                            <div style={{ marginBottom: '2px', fontSize: '0.7rem' }}>
+                                                                <strong>Pick Points:</strong>{' '}
+                                                                {formData.pickPoints.slice(0, numPP).map((pp, i) => (
+                                                                    <span key={i}>{pp.label}{pp.position ? ` (${pp.position})` : ''}{i < numPP - 1 ? ' | ' : ''}</span>
+                                                                ))}
+                                                            </div>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
+                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
+                                                                <strong>Procedure Summary:</strong><br />
+                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
+                                                                    {formData.procedureSummary}
                                                                 </div>
-                                                                <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
-                                                                    <strong>Hook:</strong> {test.hookTested || 'Main Hook'} | <strong>Type:</strong> {test.loadType}
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                    {formData.spreaderTests
+                                                        .slice(0, parseInt(formData.numTests))
+                                                        .map((test, index) => (
+                                                            <tr key={index}>
+                                                                <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
+                                                                <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
+                                                                    <div className="font-bold" style={{ fontSize: '0.9rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                        {test.itemDescription || formData.equipmentTested || 'Spreader Beam Load Test'}
+                                                                    </div>
+                                                                    <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
+                                                                        <strong>Type:</strong> {test.loadType} | <strong>TEST LOAD:</strong> {test.wllPercentage || '100%'} WLL
+                                                                    </div>
+                                                                </td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.localTime}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.testDuration}</td>
+                                                                {test.pickPointData.slice(0, numPP).map((ppd, ppIdx) => (
+                                                                    <td key={ppIdx} className="force-val" style={{ fontSize: '0.85rem', verticalAlign: 'middle', paddingTop: '8px' }}>
+                                                                        {ppd.measuredForce ? `${ppd.measuredForce} lbs` : '--'}
+                                                                    </td>
+                                                                ))}
+                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                            </tr>
+                                                        ))}
+                                                </tbody>
+                                            </table>
+                                        );
+                                    } else {
+                                        content = (
+                                            <table className="cert-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th style={{ width: '40px' }}>Item</th>
+                                                        <th>Item Description</th>
+                                                        <th style={{ width: '80px' }}>Local Time</th>
+                                                        <th style={{ width: '80px' }}>Test Dur.</th>
+                                                        <th style={{ width: '100px' }}>Measured Force</th>
+                                                        <th style={{ width: '60px' }}>Accept</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr>
+                                                        <td></td>
+                                                        <td className="text-left" style={{ paddingBottom: '8px' }}>
+                                                            <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <div><strong style={{ color: '#555' }}>Manufacturer:</strong> {formData.equipmentManufacturer || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>S/N:</strong> {formData.equipmentSerial || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>WLL:</strong> {formData.equipmentWll || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>Target Test Load:</strong> {formData.targetLoad || 'N/A'}</div>
+                                                            </div>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
+                                                            {formData.hasAuxHook && (
+                                                                <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Auxiliary Hook WLL:</strong> {formData.auxHookWll || 'N/A'}</div>
+                                                            )}
+                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
+                                                                <strong>Procedure Summary:</strong><br />
+                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
+                                                                    {formData.procedureSummary}
                                                                 </div>
-                                                                <div className="font-bold" style={{ marginTop: '4px', color: '#1a3a6c', fontSize: '0.8rem' }}>
-                                                                    TEST LOAD: {test.wllPercentage || '100%'} WLL
-                                                                </div>
-                                                            </td>
-                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.localTime}</td>
-                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.testDuration}</td>
-                                                            <td className="force-val" style={{ fontSize: '1rem', verticalAlign: 'middle', paddingTop: '8px' }}>{test.measuredForce} lbs</td>
-                                                            <td className="accept-val" style={{ color: test.testResults === 'PASS' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
-                                                        </tr>
-                                                    ))}
-                                            </tbody>
-                                        </table>
-                                    );
+                                                            </div>
+                                                        </td>
+                                                        <td></td>
+                                                        <td></td>
+                                                        <td></td>
+                                                        <td></td>
+                                                    </tr>
+                                                    {formData.tests
+                                                        .slice(0, parseInt(formData.numTests))
+                                                        .map((test, index) => (
+                                                            <tr key={index}>
+                                                                <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
+                                                                <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
+                                                                    <div className="font-bold" style={{ fontSize: '0.95rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                        {test.itemDescription || formData.equipmentTested}
+                                                                    </div>
+                                                                    <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
+                                                                        <strong>Hook:</strong> {test.hookTested || 'Main Hook'} | <strong>Type:</strong> {test.loadType}
+                                                                    </div>
+                                                                    <div className="font-bold" style={{ marginTop: '4px', color: '#1a3a6c', fontSize: '0.8rem' }}>
+                                                                        TEST LOAD: {test.wllPercentage || '100%'} WLL
+                                                                    </div>
+                                                                </td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.localTime}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.testDuration}</td>
+                                                                <td className="force-val" style={{ fontSize: '1rem', verticalAlign: 'middle', paddingTop: '8px' }}>{test.measuredForce} lbs</td>
+                                                                <td className="accept-val" style={{ color: test.testResults === 'PASS' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                            </tr>
+                                                        ))}
+                                                </tbody>
+                                            </table>
+                                        );
+                                    }
                                     break;
                                 case 'footer':
                                     content = (
@@ -631,6 +780,18 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                     <div className="content-val font-bold">{formData.testResults}</div>
                                                 </div>
                                             </div>
+                                            {/* Customer Signature */}
+                                            {customerSignature && (
+                                                <div style={{ marginTop: '8px', display: 'flex', alignItems: 'flex-end', gap: '16px', borderTop: '0.5px solid #eee', paddingTop: '8px' }}>
+                                                    <div style={{ flex: 1 }}>
+                                                        <div style={{ fontSize: '0.65rem', color: '#888', marginBottom: '2px' }}>Customer Acknowledgement:</div>
+                                                        <img src={customerSignature} alt="Customer Signature" style={{ maxHeight: '60px', maxWidth: '250px' }} />
+                                                    </div>
+                                                    <div style={{ fontSize: '0.65rem', color: '#888' }}>
+                                                        Date: {new Date().toLocaleDateString()}
+                                                    </div>
+                                                </div>
+                                            )}
                                             <div style={{ marginTop: '4px', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
                                                 Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
                                             </div>
@@ -801,9 +962,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             style={{ fontSize: '0.9rem', padding: '6px 12px', minWidth: '220px' }}
                         >
                             <option value="crane-hook">Standard Crane Hook</option>
-                            <option value="rigging" disabled>Rigging & Spreader Bar (Coming Soon)</option>
-                            <option value="vessel" disabled>Pressure Vessel (Coming Soon)</option>
-                            <option value="custom" disabled>Custom Template (Coming Soon)</option>
+                            <option value="spreader-beam">Spreader Beam</option>
                         </select>
                         <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
                             Job: <strong style={{ color: 'white' }}>{job?.metadata?.jobNumber || 'N/A'}</strong>
@@ -929,7 +1088,21 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
                             <label>Cert No.</label>
-                            <input name="certNo" value={formData.certNo} onChange={handleInput} />
+                            <div style={{ display: 'flex', gap: '6px' }}>
+                                <input name="certNo" value={formData.certNo} onChange={handleInput} style={{ flex: 1 }} />
+                                <button
+                                    type="button"
+                                    className="action-btn secondary"
+                                    style={{ padding: '4px 10px', fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+                                    onClick={async () => {
+                                        const certNo = await getElectronAPI().certNextNumber();
+                                        setFormData(prev => ({ ...prev, certNo }));
+                                    }}
+                                    title="Auto-generate next certificate number"
+                                >
+                                    Auto #
+                                </button>
+                            </div>
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
                             <label>Project Manager</label>
@@ -1016,6 +1189,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             </select>
                         </div>
                     </div>
+                    {certLayout === 'crane-hook' && (
                     <div className="form-row">
                         <div className="form-group">
                             <label>Manufacturer</label>
@@ -1034,12 +1208,22 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <input name="targetLoad" value={formData.targetLoad} onChange={handleInput} placeholder="e.g. 50 Tons" />
                         </div>
                     </div>
+                    )}
+                    {certLayout === 'spreader-beam' && (
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>Target Test Load</label>
+                            <input name="targetLoad" value={formData.targetLoad} onChange={handleInput} placeholder="e.g. 50 Tons" />
+                        </div>
+                    </div>
+                    )}
                     <div className="form-group">
                         <label>Procedure Summary</label>
                         <textarea name="procedureSummary" value={formData.procedureSummary} onChange={handleInput} rows="3" placeholder="Describe the testing procedure..." />
                     </div>
                 </section>
 
+                {certLayout === 'crane-hook' && (
                 <section className="form-section span-2">
                     <h3>Crane Configuration (Optional)</h3>
                     <div className="form-row" style={{ alignItems: 'center' }}>
@@ -1066,6 +1250,61 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         )}
                     </div>
                 </section>
+                )}
+
+                {certLayout === 'spreader-beam' && (
+                <section className="form-section span-2">
+                    <h3>Spreader Beam Configuration</h3>
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>Beam Manufacturer</label>
+                            <input name="beamManufacturer" value={formData.beamManufacturer} onChange={handleInput} placeholder="Manufacturer name..." />
+                        </div>
+                        <div className="form-group">
+                            <label>Beam S/N</label>
+                            <input name="beamSerial" value={formData.beamSerial} onChange={handleInput} placeholder="Serial number..." />
+                        </div>
+                        <div className="form-group">
+                            <label>Beam Length</label>
+                            <input name="beamLength" value={formData.beamLength} onChange={handleInput} placeholder="e.g. 40 ft" />
+                        </div>
+                        <div className="form-group">
+                            <label>Beam WLL</label>
+                            <input name="beamWll" value={formData.beamWll} onChange={handleInput} placeholder="e.g. 50 Tons" />
+                        </div>
+                    </div>
+                    <div className="form-row" style={{ alignItems: 'flex-end' }}>
+                        <div className="form-group" style={{ maxWidth: '200px' }}>
+                            <label>Number of Pick Points</label>
+                            <select name="numPickPoints" value={formData.numPickPoints} onChange={handleInput}>
+                                {[1, 2, 3, 4, 5, 6].map(n => (
+                                    <option key={n} value={n}>{n} Pick Point{n > 1 ? 's' : ''}</option>
+                                ))}
+                            </select>
+                        </div>
+                    </div>
+                    <div style={{ marginTop: '12px' }}>
+                        <h4 style={{ color: 'var(--yellow-accent)', fontSize: '0.85rem', marginBottom: '10px' }}>Pick Point Positions</h4>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '10px' }}>
+                            {formData.pickPoints.slice(0, parseInt(formData.numPickPoints)).map((pp, i) => (
+                                <div key={i} style={{ background: 'var(--bg-elevated)', padding: '12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                                    <div style={{ fontSize: '0.75rem', color: 'var(--yellow-accent)', fontWeight: 700, marginBottom: '6px' }}>PICK POINT {i + 1}</div>
+                                    <div className="form-group" style={{ marginBottom: '6px' }}>
+                                        <label style={{ fontSize: '0.72rem' }}>Label</label>
+                                        <input value={pp.label} onChange={(e) => handlePickPointInput(i, 'label', e.target.value)}
+                                            placeholder={`Pick Point ${i + 1}`} style={{ fontSize: '0.82rem' }} />
+                                    </div>
+                                    <div className="form-group">
+                                        <label style={{ fontSize: '0.72rem' }}>Position on Beam</label>
+                                        <input value={pp.position} onChange={(e) => handlePickPointInput(i, 'position', e.target.value)}
+                                            placeholder="e.g. 10 ft from center" style={{ fontSize: '0.82rem' }} />
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </section>
+                )}
 
                 <section className="form-section span-2">
                     <h3>Site Photos</h3>
@@ -1110,7 +1349,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 </section>
             </div>
 
-            {formData.tests.slice(0, parseInt(formData.numTests)).map((test, index) => (
+            {/* Crane Hook Test Records */}
+            {certLayout === 'crane-hook' && formData.tests.slice(0, parseInt(formData.numTests)).map((test, index) => (
                 <section className="form-section" key={index} style={{ borderLeft: '4px solid var(--accent)' }}>
                     <h3>Test Record #{index + 1} {index === 0 && <span style={{ fontSize: '0.7rem', color: 'var(--yellow-accent)', marginLeft: '10px' }}>(Auto-Filled)</span>}</h3>
                     <div className="form-row">
@@ -1186,6 +1426,88 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 <option value="10 minutes" />
                                 <option value="15 minutes" />
                             </datalist>
+                        </div>
+                    </div>
+                </section>
+            ))}
+
+            {/* Spreader Beam Test Records — with per-pick-point data */}
+            {certLayout === 'spreader-beam' && formData.spreaderTests.slice(0, parseInt(formData.numTests)).map((test, index) => (
+                <section className="form-section" key={`sb-${index}`} style={{ borderLeft: '4px solid var(--yellow-accent)' }}>
+                    <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        Test Record #{index + 1}
+                        <span style={{ fontSize: '0.7rem', background: 'var(--yellow-accent)', color: '#000', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>SPREADER BEAM</span>
+                    </h3>
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>Load Type</label>
+                            <select value={test.loadType} onChange={(e) => handleSpreaderTestInput(index, 'loadType', e.target.value)}>
+                                <option value="Static">Static</option>
+                                <option value="Dynamic">Dynamic</option>
+                            </select>
+                        </div>
+                        <div className="form-group">
+                            <label>% of WLL</label>
+                            <input value={test.wllPercentage} onChange={(e) => handleSpreaderTestInput(index, 'wllPercentage', e.target.value)} placeholder="e.g. 100%" />
+                        </div>
+                        <div className="form-group">
+                            <label>Local Time (hr:min)</label>
+                            <input value={test.localTime || ''} onChange={(e) => handleSpreaderTestInput(index, 'localTime', e.target.value)} placeholder="00:00" />
+                        </div>
+                        <div className="form-group">
+                            <label>Duration</label>
+                            <input
+                                list={`sb-duration-${index}`}
+                                value={test.testDuration || ''}
+                                onChange={(e) => handleSpreaderTestInput(index, 'testDuration', e.target.value)}
+                                placeholder="Select or type..."
+                            />
+                            <datalist id={`sb-duration-${index}`}>
+                                <option value="5 minutes" />
+                                <option value="10 minutes" />
+                                <option value="15 minutes" />
+                            </datalist>
+                        </div>
+                        <div className="form-group">
+                            <label>Overall Accept</label>
+                            <select value={test.accept} onChange={(e) => handleSpreaderTestInput(index, 'accept', e.target.value)}>
+                                <option value="YES">YES</option>
+                                <option value="NO">NO</option>
+                                <option value="N/A">N/A</option>
+                            </select>
+                        </div>
+                        <div className="form-group" style={{ flex: 2 }}>
+                            <label>Description</label>
+                            <input value={test.itemDescription || ''} onChange={(e) => handleSpreaderTestInput(index, 'itemDescription', e.target.value)}
+                                placeholder="e.g. Full span load test at 100% WLL..." />
+                        </div>
+                    </div>
+
+                    {/* Per-pick-point measured forces */}
+                    <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                        <div style={{ fontSize: '0.78rem', color: 'var(--yellow-accent)', fontWeight: 700, marginBottom: '10px' }}>MEASURED FORCE AT EACH PICK POINT</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(parseInt(formData.numPickPoints), 3)}, 1fr)`, gap: '10px' }}>
+                            {test.pickPointData.slice(0, parseInt(formData.numPickPoints)).map((ppd, ppIdx) => (
+                                <div key={ppIdx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                    <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        {formData.pickPoints[ppIdx]?.label || `Pick Point ${ppIdx + 1}`}
+                                        {formData.pickPoints[ppIdx]?.position && <span style={{ opacity: 0.6 }}> ({formData.pickPoints[ppIdx].position})</span>}
+                                    </label>
+                                    <div style={{ display: 'flex', gap: '6px' }}>
+                                        <input
+                                            value={ppd.measuredForce || ''}
+                                            onChange={(e) => handleSpreaderPickPointData(index, ppIdx, 'measuredForce', e.target.value)}
+                                            placeholder="lbs"
+                                            style={{ flex: 1, fontSize: '0.85rem' }}
+                                        />
+                                        <select value={ppd.accept} onChange={(e) => handleSpreaderPickPointData(index, ppIdx, 'accept', e.target.value)}
+                                            style={{ width: '65px', fontSize: '0.78rem' }}>
+                                            <option value="YES">YES</option>
+                                            <option value="NO">NO</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
                     </div>
                 </section>

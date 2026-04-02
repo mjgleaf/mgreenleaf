@@ -26,12 +26,12 @@ module.exports = {
     MIN_PACKET_LENGTH: 12,
 
     // Wake Burst Configuration
-    WAKE_BURST_COUNT: 50,
-    WAKE_BURST_INTERVAL_MS: 100,
+    WAKE_BURST_COUNT: 10,
+    WAKE_BURST_INTERVAL_MS: 200,
 
     // Timing Intervals
-    KEEP_AWAKE_INTERVAL_MS: 1000,
-    POLL_INTERVAL_MS: 500,
+    KEEP_AWAKE_INTERVAL_MS: 1500,
+    POLL_INTERVAL_MS: 1000,
     DEVICE_SCAN_INTERVAL_MS: 2000,
 
     // Default Group ID

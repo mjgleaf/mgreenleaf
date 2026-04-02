@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useReducer } from 'react';
+import { useTheme } from '../App';
 import logo from '../logo.png';
 import ErrorBoundary from './ErrorBoundary';
 import WelcomeView from './WelcomeView';
@@ -41,6 +42,7 @@ function navReducer(state, action) {
 }
 
 function ServiceView({ onGoHome, onOpenSettings }) {
+    const { theme, toggleTheme } = useTheme();
     const [nav, dispatch] = useReducer(navReducer, navInitialState);
     const { activeTab, activeJobId, selectedSharePointJob, viewingCompany, importContext, isCertPreview, displayUnit, displayTimeUnit, xUnit } = nav;
 
@@ -58,6 +60,14 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [deviceStatus, setDeviceStatus] = useState('disconnected');
     const [recoverySession, setRecoverySession] = useState(null);
     const [showRecoveryPrompt, setShowRecoveryPrompt] = useState(false);
+
+    // Companion Server state
+    const [companionRunning, setCompanionRunning] = useState(false);
+    const [companionIPs, setCompanionIPs] = useState([]);
+    const [companionPort, setCompanionPort] = useState(3001);
+    const [companionClients, setCompanionClients] = useState(0);
+    const [companionPhotos, setCompanionPhotos] = useState([]);
+    const companionPollRef = useRef(null);
 
     // --- Lifted Live Telemetry & Logging State ---
     const [devices, setDevices] = useState({}); // tag -> latest packet
@@ -126,6 +136,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         const emptyIndex = currentTags.findIndex(t => t === null);
                         if (emptyIndex !== -1 && emptyIndex < cellCountRef.current) {
                             currentTags[emptyIndex] = packet.tag;
+                            selectedTagsRef.current = currentTags;
                             setSelectedTags(currentTags);
                         }
                     }
@@ -366,6 +377,55 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         });
     };
 
+    // ── Companion Server Effects ──
+    useEffect(() => {
+        const checkStatus = async () => {
+            try {
+                const status = await getElectronAPI().companionStatus();
+                setCompanionRunning(status.running);
+                setCompanionClients(status.clients);
+                if (status.running) setCompanionIPs(status.ips);
+            } catch (e) { /* ignore */ }
+        };
+        checkStatus();
+    }, []);
+
+    useEffect(() => {
+        if (companionRunning) {
+            companionPollRef.current = setInterval(async () => {
+                try {
+                    const status = await getElectronAPI().companionStatus();
+                    setCompanionClients(status.clients);
+                    setCompanionIPs(status.ips);
+                } catch (e) { /* ignore */ }
+            }, 3000);
+        }
+        return () => { if (companionPollRef.current) clearInterval(companionPollRef.current); };
+    }, [companionRunning]);
+
+    useEffect(() => {
+        const removeListener = getElectronAPI().onCompanionPhoto?.((photo) => {
+            setCompanionPhotos(prev => [...prev, photo]);
+        });
+        return () => { if (typeof removeListener === 'function') removeListener(); };
+    }, []);
+
+    const handleCompanionStart = async () => {
+        const result = await getElectronAPI().companionStart();
+        if (result.success) {
+            setCompanionRunning(true);
+            setCompanionIPs(result.ips);
+            setCompanionPort(result.port);
+        }
+    };
+
+    const handleCompanionStop = async () => {
+        await getElectronAPI().companionStop();
+        setCompanionRunning(false);
+        setCompanionClients(0);
+        setCompanionIPs([]);
+    };
+
     const handleJobChange = (id) => {
         setActiveJobId(id);
         getElectronAPI().saveData({
@@ -455,6 +515,10 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         <div className={`save-indicator ${saveStatus}`} title={`Data persistence: ${saveStatus}`}>
                             {saveStatus === 'saving' ? '⏳' : saveStatus === 'error' ? '❌' : '☁️'}
                         </div>
+                        <div className="theme-toggle" title="Toggle theme">
+                            <button className={`theme-toggle-option ${theme === 'light' ? 'active' : ''}`} onClick={toggleTheme}>☀️</button>
+                            <button className={`theme-toggle-option ${theme === 'dark' ? 'active' : ''}`} onClick={toggleTheme}>🌙</button>
+                        </div>
                         <button onClick={onOpenSettings} className="action-btn secondary circle" title="Settings">⚙️</button>
                     </div>
                 </header>
@@ -468,6 +532,9 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         <button className={`nav-btn ${activeTab === 'import' ? 'active' : ''}`} onClick={() => { setActiveTab('import'); setImportContext(null); }}>Import CSV</button>
                         <button className={`nav-btn ${activeTab === 'report' ? 'active' : ''}`} onClick={() => setActiveTab('report')}>Saved Projects / Reports</button>
                         <button className={`nav-btn ${activeTab === 'cert' ? 'active' : ''}`} onClick={() => setActiveTab('cert')}>Certificate</button>
+                        <button className={`nav-btn ${activeTab === 'companion' ? 'active' : ''}`} onClick={() => setActiveTab('companion')}>
+                            📱 Companion{companionRunning ? ` (${companionClients})` : ''}
+                        </button>
                         <div className="flex-grow"></div>
                         <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')}>Settings</button>
                     </div>
@@ -569,6 +636,150 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             xUnit={xUnit}
                             displayUnit={displayUnit}
                         />
+                    )}
+                    {activeTab === 'companion' && (
+                        <div style={{ maxWidth: '800px', margin: '0 auto', padding: '1.5rem' }}>
+                            <h2 style={{ marginBottom: '0.25rem' }}>📱 Companion App</h2>
+                            <p style={{ color: 'var(--text-muted)', marginBottom: '1.5rem' }}>
+                                Let field crew monitor live load data on their phones over the local WiFi network.
+                            </p>
+
+                            {/* Server Controls */}
+                            <div style={{
+                                background: 'var(--bg-card)', borderRadius: '12px', padding: '1.5rem',
+                                border: '1px solid var(--border-color)', marginBottom: '1.5rem'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                                    <div>
+                                        <h3 style={{ margin: 0 }}>Server Status</h3>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px' }}>
+                                            <span style={{
+                                                display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%',
+                                                background: companionRunning ? '#22c55e' : '#ef4444',
+                                                boxShadow: companionRunning ? '0 0 8px rgba(34,197,94,0.5)' : 'none'
+                                            }}></span>
+                                            <span style={{ color: companionRunning ? '#22c55e' : '#ef4444', fontWeight: 600 }}>
+                                                {companionRunning ? 'Running' : 'Stopped'}
+                                            </span>
+                                            {companionRunning && (
+                                                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginLeft: '12px' }}>
+                                                    {companionClients} phone{companionClients !== 1 ? 's' : ''} connected
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <button
+                                        className={`action-btn ${companionRunning ? 'danger' : 'primary'}`}
+                                        onClick={companionRunning ? handleCompanionStop : handleCompanionStart}
+                                    >
+                                        {companionRunning ? '⏹ Stop Server' : '▶ Start Server'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Connection Instructions */}
+                            {companionRunning && companionIPs.length > 0 && (
+                                <div style={{
+                                    background: 'var(--bg-card)', borderRadius: '12px', padding: '1.5rem',
+                                    border: '1px solid var(--border-color)', marginBottom: '1.5rem'
+                                }}>
+                                    <h3 style={{ margin: '0 0 1rem 0' }}>📲 Connect a Phone</h3>
+                                    <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
+                                        Make sure the phone is on the <strong>same WiFi network</strong> as this computer, then open one of these URLs in the phone's browser:
+                                    </p>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                        {companionIPs.map((ip, i) => {
+                                            const url = `http://${ip.address}:${companionPort}`;
+                                            return (
+                                                <div key={i} style={{
+                                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                                    background: 'var(--bg-main)', borderRadius: '8px', padding: '12px 16px',
+                                                    border: '1px solid var(--border-color)'
+                                                }}>
+                                                    <div>
+                                                        <div style={{ fontFamily: 'monospace', fontSize: '1.1rem', fontWeight: 600, color: 'var(--accent-primary)' }}>
+                                                            {url}
+                                                        </div>
+                                                        <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '2px' }}>
+                                                            {ip.name}
+                                                        </div>
+                                                    </div>
+                                                    <button
+                                                        className="action-btn secondary"
+                                                        style={{ fontSize: '0.85rem', padding: '6px 14px' }}
+                                                        onClick={() => navigator.clipboard.writeText(url)}
+                                                    >
+                                                        📋 Copy
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    <div style={{
+                                        marginTop: '1rem', padding: '12px', borderRadius: '8px',
+                                        background: 'rgba(240, 184, 0, 0.08)', border: '1px solid rgba(240, 184, 0, 0.2)',
+                                        color: 'var(--text-muted)', fontSize: '0.85rem'
+                                    }}>
+                                        💡 <strong>Tip:</strong> On the phone, tap "Add to Home Screen" in the browser menu to install it as an app icon.
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Photos Received */}
+                            {companionPhotos.length > 0 && (
+                                <div style={{
+                                    background: 'var(--bg-card)', borderRadius: '12px', padding: '1.5rem',
+                                    border: '1px solid var(--border-color)', marginBottom: '1.5rem'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                                        <h3 style={{ margin: 0 }}>📷 Photos from Field ({companionPhotos.length})</h3>
+                                        <button className="action-btn secondary" style={{ fontSize: '0.8rem', padding: '4px 12px' }} onClick={() => setCompanionPhotos([])}>Clear</button>
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '10px' }}>
+                                        {companionPhotos.map((photo, i) => (
+                                            <div key={i} style={{ borderRadius: '8px', overflow: 'hidden', border: '1px solid var(--border-color)' }}>
+                                                <img src={photo.dataUrl} alt={`Field photo ${i + 1}`} style={{ width: '100%', height: '120px', objectFit: 'cover', display: 'block' }} />
+                                                <div style={{ padding: '4px 8px', fontSize: '0.7rem', color: 'var(--text-muted)', background: 'var(--bg-main)' }}>
+                                                    {new Date(photo.timestamp).toLocaleTimeString()}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* How It Works */}
+                            {!companionRunning && (
+                                <div style={{
+                                    background: 'var(--bg-card)', borderRadius: '12px', padding: '1.5rem',
+                                    border: '1px solid var(--border-color)'
+                                }}>
+                                    <h3 style={{ margin: '0 0 1rem 0' }}>How It Works</h3>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                        {[
+                                            { step: '1', title: 'Start the Server', desc: 'Click "Start Server" above to begin broadcasting live data on your local network.' },
+                                            { step: '2', title: 'Connect a Phone', desc: 'On any phone connected to the same WiFi, open the URL shown in the browser.' },
+                                            { step: '3', title: 'Monitor Live Data', desc: 'The phone will display real-time load readings, overload alerts with vibration, and total load.' },
+                                            { step: '4', title: 'Capture Photos', desc: 'Field crew can take photos from their phone that are sent back to OSCAR automatically.' },
+                                        ].map(item => (
+                                            <div key={item.step} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                                                <div style={{
+                                                    width: '28px', height: '28px', borderRadius: '50%', flexShrink: 0,
+                                                    background: 'var(--accent-primary)', color: '#fff', fontWeight: 700,
+                                                    display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.85rem'
+                                                }}>
+                                                    {item.step}
+                                                </div>
+                                                <div>
+                                                    <div style={{ fontWeight: 600, marginBottom: '2px' }}>{item.title}</div>
+                                                    <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>{item.desc}</div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     )}
                     {activeTab === 'settings' && <SettingsView onSettingsSaved={() => { }} />}
                 </div>

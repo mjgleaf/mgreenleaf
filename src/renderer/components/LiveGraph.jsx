@@ -87,7 +87,7 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
     }, [data, displayUnit, xUnit]);
 
     return (
-        <div className="live-graph-container" style={{ background: 'var(--bg-card)', padding: '20px', borderRadius: '10px', border: '1px solid var(--border)', marginTop: '20px' }}>
+        <div className="live-graph-container" style={{ background: 'linear-gradient(145deg, var(--bg-card), rgba(15, 25, 35, 0.5))', padding: '20px', borderRadius: 'var(--radius-lg, 14px)', border: '1px solid rgba(255,255,255,0.04)', marginTop: '20px', boxShadow: '0 4px 16px rgba(0,0,0,0.2)' }}>
             <div className="graph-controls" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '15px', alignItems: 'center' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                     <h4 style={{ margin: 0, color: 'var(--yellow-accent)' }}>Live Load Visualization</h4>
