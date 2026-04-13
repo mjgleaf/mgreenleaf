@@ -6,7 +6,7 @@ const electronPath = require('electron');
 const cleanEnv = { ...process.env };
 delete cleanEnv.ELECTRON_RUN_AS_NODE;
 
-const child = spawn(electronPath, ['.'], {
+const child = spawn(electronPath, ['--no-sandbox', '.'], {
     stdio: 'inherit',
     env: cleanEnv
 });
