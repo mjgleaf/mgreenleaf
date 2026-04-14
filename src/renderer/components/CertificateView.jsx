@@ -63,7 +63,7 @@ function CertChart({ stats, yAxisLabel, xAxisLabel, isPrint }) {
     );
 }
 
-const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit }) => {
+const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit, companionPhotos = [], onClearCompanionPhotos }) => {
     // data is actually the job object now due to activeJob refactor
     const job = data;
     const dataSets = job?.dataSets || [];
@@ -275,25 +275,31 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 // Update peak stats from chart if data is present
                 if (firstData && firstData.length > 0) {
                     const serials = current.instruments?.map(inst => inst.serialNo).filter(Boolean).flatMap(s => s.split(/[, \s]+/)) || [];
-                    const stats = processChartData(firstData, serials);
+                    const stats = processChartData(firstData, serials, displayUnit || 'lbs');
                     if (stats) {
                         const updatedTests = [...current.tests];
 
                         // Auto-fill first record ONLY if it has never been set (null = untouched)
                         if (updatedTests[0].measuredForce === null) {
-                            updatedTests[0].measuredForce = stats.maxWeight.toFixed(0);
+                            const unitLabel = displayUnit === 'tons' ? 'Tons' : displayUnit === 'tonnes' ? 'Tonnes' : 'lbs';
+                            const decimals = displayUnit === 'tons' || displayUnit === 'tonnes' ? 2 : 0;
+                            updatedTests[0].measuredForce = stats.maxWeight.toFixed(decimals) + ' ' + unitLabel;
                         }
                         if (updatedTests[0].localTime === null) {
                             updatedTests[0].localTime = stats.peakTime;
                         }
                         if (updatedTests[0].testDuration === null || updatedTests[0].testDuration === '') {
-                            updatedTests[0].testDuration = stats.totalTime.toFixed(0);
+                            const totalMin = stats.totalTime;
+                            if (totalMin >= 60) {
+                                const hrs = Math.floor(totalMin / 60);
+                                const mins = Math.round(totalMin % 60);
+                                updatedTests[0].testDuration = hrs + ' hr ' + mins + ' min';
+                            } else {
+                                updatedTests[0].testDuration = Math.round(totalMin) + ' min';
+                            }
                         }
 
                         current.tests = updatedTests;
-                        if (!current.equipmentWll) {
-                            current.equipmentWll = stats.maxWeight.toFixed(0) + ' lbs';
-                        }
                     }
                 }
 
@@ -457,6 +463,22 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             }
             return newFormData;
         });
+    };
+
+    const importCompanionPhotos = async () => {
+        if (!companionPhotos || companionPhotos.length === 0) return;
+        for (const photo of companionPhotos) {
+            const compressed = await compressImage(photo.dataUrl);
+            setFormData(prev => {
+                const newPhotos = [...(prev.photos || []), compressed].slice(0, 4);
+                const newFormData = { ...prev, photos: newPhotos };
+                if (onUpdateMetadata) {
+                    onUpdateMetadata(jobId, { certData: newFormData });
+                }
+                return newFormData;
+            });
+        }
+        if (onClearCompanionPhotos) onClearCompanionPhotos();
     };
 
     const handleSaveDraft = () => {
@@ -1325,6 +1347,29 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             )}
                         </div>
                         <p className="helper-text">Add up to 4 photos to include in the certificate.</p>
+                        {companionPhotos && companionPhotos.length > 0 && (!formData.photos || formData.photos.length < 4) && (
+                            <div style={{
+                                marginTop: '1rem', padding: '1rem', background: 'rgba(59, 130, 246, 0.08)',
+                                border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: '8px'
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
+                                    <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>
+                                        📱 {companionPhotos.length} photo{companionPhotos.length !== 1 ? 's' : ''} from Companion App
+                                    </span>
+                                    <button className="action-btn" style={{ fontSize: '0.8rem', padding: '6px 14px' }} onClick={importCompanionPhotos}>
+                                        Import to Certificate
+                                    </button>
+                                </div>
+                                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                    {companionPhotos.slice(0, 4).map((photo, i) => (
+                                        <img key={i} src={photo.dataUrl} alt={`Companion ${i + 1}`} style={{
+                                            width: '80px', height: '80px', objectFit: 'cover', borderRadius: '6px',
+                                            border: '1px solid var(--border-color)'
+                                        }} />
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </section>
 

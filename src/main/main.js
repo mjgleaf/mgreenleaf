@@ -931,8 +931,8 @@ function loadSettings() {
 
     // Default configuration (from .env or reasonable defaults)
     const defaults = {
-        clientId: process.env.AZURE_CLIENT_ID || '',
-        tenantId: process.env.AZURE_TENANT_ID || '',
+        clientId: process.env.AZURE_CLIENT_ID || 'c1c9fa04-de58-45f4-86c4-e317adfc27f0',
+        tenantId: process.env.AZURE_TENANT_ID || 'dfa020f9-3a56-4777-b310-5c2ce646973e',
         sharepointSite: 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles',
         leadListName: 'Lead List',
         openaiKey: process.env.OPENAI_API_KEY || '',

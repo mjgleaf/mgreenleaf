@@ -635,6 +635,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             onPreviewModeChange={(val) => setIsCertPreview(val)}
                             xUnit={xUnit}
                             displayUnit={displayUnit}
+                            companionPhotos={companionPhotos}
+                            onClearCompanionPhotos={() => setCompanionPhotos([])}
                         />
                     )}
                     {activeTab === 'companion' && (
