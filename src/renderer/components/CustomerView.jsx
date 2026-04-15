@@ -761,6 +761,19 @@ function CustomerView({ onGoHome }) {
         return () => { if (companionPollRef.current) clearInterval(companionPollRef.current); };
     }, [companionRunning]);
 
+    // Sync session state to companion server whenever key state changes
+    useEffect(() => {
+        if (companionRunning && getElectronAPI().companionSyncState) {
+            getElectronAPI().companionSyncState({
+                selectedTags,
+                cellCount,
+                isLogging,
+                sessionName,
+                loggedSamples: loggedData.length,
+            });
+        }
+    }, [companionRunning, selectedTags, cellCount, isLogging, sessionName, loggedData.length]);
+
     // Listen for photos from companion
     useEffect(() => {
         const removeListener = getElectronAPI().onCompanionPhoto?.((photo) => {

@@ -55,6 +55,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     companionStart: () => ipcRenderer.invoke('companion:start'),
     companionStop: () => ipcRenderer.invoke('companion:stop'),
     companionStatus: () => ipcRenderer.invoke('companion:status'),
+    companionSyncState: (state) => ipcRenderer.invoke('companion:syncState', state),
     companionGetPhotos: () => ipcRenderer.invoke('companion:getPhotos'),
     companionClearPhotos: () => ipcRenderer.invoke('companion:clearPhotos'),
     onCompanionPhoto: (callback) => {

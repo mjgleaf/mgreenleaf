@@ -403,6 +403,18 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         return () => { if (companionPollRef.current) clearInterval(companionPollRef.current); };
     }, [companionRunning]);
 
+    // Sync session state to companion server whenever key state changes
+    useEffect(() => {
+        if (companionRunning && getElectronAPI().companionSyncState) {
+            getElectronAPI().companionSyncState({
+                selectedTags,
+                cellCount,
+                isLogging,
+                loggedSamples: loggedData.length,
+            });
+        }
+    }, [companionRunning, selectedTags, cellCount, isLogging, loggedData.length]);
+
     useEffect(() => {
         const removeListener = getElectronAPI().onCompanionPhoto?.((photo) => {
             setCompanionPhotos(prev => [...prev, photo]);

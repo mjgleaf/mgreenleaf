@@ -707,6 +707,11 @@ function scanForDongle() {
             if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('device-status-changed', deviceStatus);
             }
+
+            // Forward device status to companion server for mobile phones
+            if (companionServer.isRunning) {
+                companionServer.updateSessionState({ deviceStatus });
+            }
         }
     } catch (err) {
         console.error('Error scanning for HID devices:', err);
@@ -2202,6 +2207,8 @@ app.whenReady().then(() => {
     ipcMain.handle('companion:start', async () => {
         try {
             const result = await companionServer.start();
+            // Sync current device status immediately so phones see the correct state
+            companionServer.updateSessionState({ deviceStatus });
             return { success: true, port: result.port, ips: result.ips };
         } catch (err) {
             console.error('[COMPANION] Start failed:', err);
@@ -2220,6 +2227,14 @@ app.whenReady().then(() => {
 
     ipcMain.handle('companion:status', () => {
         return companionServer.getStatus();
+    });
+
+    ipcMain.handle('companion:syncState', (event, state) => {
+        if (companionServer.isRunning) {
+            // Always include current device status from main process
+            companionServer.updateSessionState({ ...state, deviceStatus });
+        }
+        return { success: true };
     });
 
     ipcMain.handle('companion:getPhotos', () => {
