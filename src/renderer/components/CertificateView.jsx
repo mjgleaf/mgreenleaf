@@ -92,6 +92,12 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         equipmentManufacturer: '',
         equipmentSerial: '',
         equipmentWll: '',
+        hooks: [{
+            name: 'Main Hook',
+            manufacturer: '',
+            serial: '',
+            wll: ''
+        }],
         procedureSummary: '',
         referenceStandards: '',
         numTests: 1,
@@ -251,6 +257,24 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     delete current.accuracy;
                 }
 
+                // Migrate legacy single-hook data to hooks array if needed
+                if (!current.hooks || current.hooks.length === 0) {
+                    const mainHook = {
+                        name: 'Main Hook',
+                        manufacturer: current.equipmentManufacturer || '',
+                        serial: current.equipmentSerial || '',
+                        wll: current.equipmentWll || ''
+                    };
+                    if (current.hasAuxHook) {
+                        current.hooks = [
+                            mainHook,
+                            { name: 'Aux Hook', manufacturer: '', serial: '', wll: current.auxHookWll || '' }
+                        ];
+                    } else {
+                        current.hooks = [mainHook];
+                    }
+                }
+
                 // Metadata always takes priority when data changes
                 if (job?.metadata) {
                     current = {
@@ -328,6 +352,40 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (formData.instruments.length <= 1) return;
         const newInstruments = formData.instruments.filter((_, i) => i !== index);
         const newFormData = { ...formData, instruments: newInstruments };
+        setFormData(newFormData);
+        if (onUpdateMetadata) {
+            onUpdateMetadata(jobId, { certData: newFormData });
+        }
+    };
+
+    const handleHookInput = (index, field, value) => {
+        const newHooks = [...(formData.hooks || [])];
+        newHooks[index] = { ...newHooks[index], [field]: value };
+        const newFormData = { ...formData, hooks: newHooks };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) {
+            onUpdateMetadata(jobId, { certData: newFormData });
+        }
+    };
+
+    const addHook = () => {
+        const newHooks = [...(formData.hooks || []), {
+            name: `Hook ${(formData.hooks || []).length + 1}`,
+            manufacturer: '',
+            serial: '',
+            wll: ''
+        }];
+        const newFormData = { ...formData, hooks: newHooks };
+        setFormData(newFormData);
+        if (onUpdateMetadata) {
+            onUpdateMetadata(jobId, { certData: newFormData });
+        }
+    };
+
+    const removeHook = (index) => {
+        if ((formData.hooks || []).length <= 1) return;
+        const newHooks = formData.hooks.filter((_, i) => i !== index);
+        const newFormData = { ...formData, hooks: newHooks };
         setFormData(newFormData);
         if (onUpdateMetadata) {
             onUpdateMetadata(jobId, { certData: newFormData });
@@ -710,16 +768,18 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                     <tr>
                                                         <td></td>
                                                         <td className="text-left" style={{ paddingBottom: '8px' }}>
+                                                            {(formData.hooks || []).map((hook, hIdx) => (
+                                                                <div key={hIdx} style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                    <div><strong style={{ color: '#1a3a6c' }}>{hook.name || `Hook ${hIdx + 1}`}:</strong></div>
+                                                                    <div><strong style={{ color: '#555' }}>Manufacturer:</strong> {hook.manufacturer || 'N/A'}</div>
+                                                                    <div><strong style={{ color: '#555' }}>S/N:</strong> {hook.serial || 'N/A'}</div>
+                                                                    <div><strong style={{ color: '#555' }}>WLL:</strong> {hook.wll || 'N/A'}</div>
+                                                                </div>
+                                                            ))}
                                                             <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
-                                                                <div><strong style={{ color: '#555' }}>Manufacturer:</strong> {formData.equipmentManufacturer || 'N/A'}</div>
-                                                                <div><strong style={{ color: '#555' }}>S/N:</strong> {formData.equipmentSerial || 'N/A'}</div>
-                                                                <div><strong style={{ color: '#555' }}>WLL:</strong> {formData.equipmentWll || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Target Test Load:</strong> {formData.targetLoad || 'N/A'}</div>
                                                             </div>
                                                             <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
-                                                            {formData.hasAuxHook && (
-                                                                <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Auxiliary Hook WLL:</strong> {formData.auxHookWll || 'N/A'}</div>
-                                                            )}
                                                             <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
                                                                 <strong>Procedure Summary:</strong><br />
                                                                 <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
@@ -1192,18 +1252,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     {certLayout === 'crane-hook' && (
                     <div className="form-row">
                         <div className="form-group">
-                            <label>Manufacturer</label>
-                            <input name="equipmentManufacturer" value={formData.equipmentManufacturer} onChange={handleInput} placeholder="Equipment Manufacturer..." />
-                        </div>
-                        <div className="form-group">
-                            <label>S/N</label>
-                            <input name="equipmentSerial" value={formData.equipmentSerial} onChange={handleInput} placeholder="Equipment Serial Number..." />
-                        </div>
-                        <div className="form-group">
-                            <label>WLL</label>
-                            <input name="equipmentWll" value={formData.equipmentWll} onChange={handleInput} placeholder="Working Load Limit..." />
-                        </div>
-                        <div className="form-group">
                             <label>Target Test Load</label>
                             <input name="targetLoad" value={formData.targetLoad} onChange={handleInput} placeholder="e.g. 50 Tons" />
                         </div>
@@ -1225,30 +1273,62 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
                 {certLayout === 'crane-hook' && (
                 <section className="form-section span-2">
-                    <h3>Crane Configuration (Optional)</h3>
-                    <div className="form-row" style={{ alignItems: 'center' }}>
-                        <div className="form-group" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                            <input
-                                type="checkbox"
-                                name="hasAuxHook"
-                                checked={formData.hasAuxHook}
-                                onChange={(e) => handleInput({ target: { name: 'hasAuxHook', value: e.target.checked } })}
-                                style={{ width: '20px', height: '20px' }}
-                            />
-                            <label style={{ margin: 0 }}>Does the crane have an auxiliary hook?</label>
-                        </div>
-                        {formData.hasAuxHook && (
-                            <div className="form-group" style={{ flex: 1 }}>
-                                <label>Aux Hook WLL</label>
-                                <input
-                                    name="auxHookWll"
-                                    value={formData.auxHookWll}
-                                    onChange={handleInput}
-                                    placeholder="e.g., 10 Tons"
-                                />
-                            </div>
-                        )}
+                    <div className="section-header-row">
+                        <h3>Hooks</h3>
+                        <button onClick={addHook} className="action-btn small">
+                            + Add Hook
+                        </button>
                     </div>
+                    {(formData.hooks || []).map((hook, index) => (
+                        <div key={index} style={{ borderBottom: index < formData.hooks.length - 1 ? '1px solid var(--border)' : 'none', paddingBottom: '16px', marginBottom: '16px' }}>
+                            <div className="section-header-row" style={{ marginTop: '6px' }}>
+                                <h4 style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Hook #{index + 1}</h4>
+                                {formData.hooks.length > 1 && (
+                                    <button onClick={() => removeHook(index)} className="job-remove-btn" title="Remove Hook">&#10005;</button>
+                                )}
+                            </div>
+                            <div className="form-row">
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>Hook Name</label>
+                                    <input
+                                        list={`hook-name-suggestions-${index}`}
+                                        value={hook.name || ''}
+                                        onChange={(e) => handleHookInput(index, 'name', e.target.value)}
+                                        placeholder="e.g. Main Hook, Aux Hook..."
+                                    />
+                                    <datalist id={`hook-name-suggestions-${index}`}>
+                                        <option value="Main Hook" />
+                                        <option value="Aux Hook" />
+                                        <option value="Whip Hook" />
+                                    </datalist>
+                                </div>
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>Manufacturer</label>
+                                    <input
+                                        value={hook.manufacturer || ''}
+                                        onChange={(e) => handleHookInput(index, 'manufacturer', e.target.value)}
+                                        placeholder="Manufacturer..."
+                                    />
+                                </div>
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>S/N</label>
+                                    <input
+                                        value={hook.serial || ''}
+                                        onChange={(e) => handleHookInput(index, 'serial', e.target.value)}
+                                        placeholder="Serial Number..."
+                                    />
+                                </div>
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>WLL</label>
+                                    <input
+                                        value={hook.wll || ''}
+                                        onChange={(e) => handleHookInput(index, 'wll', e.target.value)}
+                                        placeholder="Working Load Limit..."
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    ))}
                 </section>
                 )}
 
@@ -1395,8 +1475,9 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 placeholder="Select or type hook..."
                             />
                             <datalist id={`hook-suggestions-${index}`}>
-                                <option value="Main Hook" />
-                                <option value="Aux Hook" />
+                                {(formData.hooks || []).map((h, hIdx) => (
+                                    <option key={hIdx} value={h.name || `Hook ${hIdx + 1}`} />
+                                ))}
                             </datalist>
                         </div>
                         <div className="form-group" style={{ flex: 2 }}>
