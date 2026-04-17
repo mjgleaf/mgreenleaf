@@ -1915,6 +1915,143 @@ async function fetchLeadList() {
 
 // --- Inventory List Fetch (Removed: Moved to Greens App) ---
 
+// Resolve the configured SharePoint site ID (with search fallback)
+async function resolveSharePointSiteId(config) {
+    const settings = loadSettings();
+    const sharepointSite = settings.sharepointSite || 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles';
+    const urlObj = new URL(sharepointSite);
+    const hostname = urlObj.hostname;
+    const sitePath = urlObj.pathname.startsWith('/') ? urlObj.pathname : `/${urlObj.pathname}`;
+    try {
+        const res = await axios.get(`https://graph.microsoft.com/v1.0/sites/${hostname}:${sitePath}`, config);
+        return res.data.id;
+    } catch (e) {
+        const searchRes = await axios.get(`https://graph.microsoft.com/v1.0/sites?search=${path.basename(sitePath)}`, config);
+        const found = searchRes.data.value.find(s => s.name === path.basename(sitePath));
+        if (!found) throw new Error(`Site at ${sharepointSite} not found`);
+        return found.id;
+    }
+}
+
+// Generic: fetch all items from a list by display name, returning raw fields
+async function fetchListItemsRaw(listName) {
+    const token = await getAccessToken();
+    const config = { headers: { Authorization: `Bearer ${token}` } };
+    const siteId = await resolveSharePointSiteId(config);
+    const listsRes = await axios.get(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists`, config);
+    const list = listsRes.data.value.find(l => l.name === listName || l.displayName === listName);
+    if (!list) {
+        const available = listsRes.data.value.map(l => l.displayName || l.name).join(', ');
+        throw new Error(`List "${listName}" not found. Available: ${available}`);
+    }
+    const items = [];
+    let nextUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${list.id}/items?expand=fields&$top=200`;
+    while (nextUrl) {
+        const res = await axios.get(nextUrl, config);
+        items.push(...res.data.value);
+        nextUrl = res.data['@odata.nextLink'] || null;
+    }
+    return { items, listId: list.id, siteId };
+}
+
+// Read a field value from a SharePoint item, trying multiple candidate keys (case-insensitive, strip non-alnum)
+function readField(fields, candidates) {
+    if (!fields) return undefined;
+    const keys = Object.keys(fields);
+    const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+    for (const cand of candidates) {
+        const target = norm(cand);
+        const key = keys.find(k => norm(k) === target);
+        if (key !== undefined) {
+            const val = fields[key];
+            if (val && typeof val === 'object' && val.Value) return val.Value;
+            return val;
+        }
+    }
+    return undefined;
+}
+
+// Detect a truthy "has certificate" signal on an inventory item.
+// Looks for any field whose name contains "cert" or "attach" with a truthy/URL value.
+function extractCertUrl(fields) {
+    if (!fields) return null;
+    for (const [key, val] of Object.entries(fields)) {
+        const lk = key.toLowerCase();
+        if (!lk.includes('cert') && !lk.includes('attach')) continue;
+        if (!val) continue;
+        if (typeof val === 'string' && val.trim()) return val.trim();
+        if (typeof val === 'object') {
+            if (val.Url) return val.Url;
+            if (val.url) return val.url;
+            if (val.Value) return typeof val.Value === 'string' ? val.Value : null;
+        }
+        if (val === true) return 'HAS_ATTACHMENT';
+    }
+    return null;
+}
+
+// Fetch equipment associated with a job: Load Out List × HydroWates Inventory (cert-bearing only)
+async function fetchJobEquipment(event, jobNumber) {
+    if (!jobNumber) return [];
+    const jobKey = String(jobNumber).trim().toLowerCase();
+    console.log(`[EQUIPMENT] Fetching equipment for job "${jobNumber}"`);
+
+    const [loadOut, inventory] = await Promise.all([
+        fetchListItemsRaw('Load Out List'),
+        fetchListItemsRaw('HydroWates Inventory')
+    ]);
+
+    // One-time column diagnostic: log keys from first row of each list
+    if (loadOut.items[0]?.fields) {
+        console.log('[EQUIPMENT] Load Out columns:', Object.keys(loadOut.items[0].fields).join(', '));
+    }
+    if (inventory.items[0]?.fields) {
+        console.log('[EQUIPMENT] Inventory columns:', Object.keys(inventory.items[0].fields).join(', '));
+    }
+
+    const jobCandidates = ['JobNumber', 'JobNum', 'Job', 'QuoteNum', 'Quote Number', 'Quote_x0023_', 'Title'];
+    const serialCandidates = ['SerialNumber', 'Serial', 'Serial Number', 'Serial_x0020_Number', 'AssetTag', 'AssetID', 'Asset', 'EquipmentID', 'Title'];
+    const nameCandidates = ['Title', 'Description', 'EquipmentName', 'ItemName', 'Name'];
+    const wllCandidates = ['WLL', 'WorkingLoadLimit', 'Capacity', 'Rating'];
+
+    // Filter Load Out to rows matching the job number (case-insensitive, trimmed)
+    const loadOutRows = loadOut.items.filter(item => {
+        const val = readField(item.fields, jobCandidates);
+        if (val === undefined || val === null) return false;
+        return String(val).trim().toLowerCase() === jobKey;
+    });
+    console.log(`[EQUIPMENT] Load Out rows matching job: ${loadOutRows.length}`);
+
+    // Build inventory map: serial → { ...fields, certUrl }
+    const invBySerial = new Map();
+    for (const item of inventory.items) {
+        const certUrl = extractCertUrl(item.fields);
+        if (!certUrl) continue;
+        const serial = readField(item.fields, serialCandidates);
+        if (serial === undefined || serial === null || String(serial).trim() === '') continue;
+        invBySerial.set(String(serial).trim().toLowerCase(), { fields: item.fields, id: item.id, certUrl });
+    }
+    console.log(`[EQUIPMENT] Inventory rows with certs: ${invBySerial.size}`);
+
+    // Intersect
+    const equipment = [];
+    for (const row of loadOutRows) {
+        const serial = readField(row.fields, serialCandidates);
+        if (serial === undefined || serial === null || String(serial).trim() === '') continue;
+        const invRow = invBySerial.get(String(serial).trim().toLowerCase());
+        if (!invRow) continue;
+        equipment.push({
+            id: row.id,
+            name: readField(row.fields, nameCandidates) || readField(invRow.fields, nameCandidates) || `Equipment ${serial}`,
+            serial: String(serial),
+            wll: readField(row.fields, wllCandidates) || readField(invRow.fields, wllCandidates) || '',
+            certUrl: invRow.certUrl
+        });
+    }
+    console.log(`[EQUIPMENT] Final equipment with certs for job: ${equipment.length}`);
+    return equipment;
+}
+
 function saveData(event, data, filename) {
     const dataPath = getDataPath(filename);
     try {
@@ -2029,6 +2166,7 @@ app.whenReady().then(() => {
     ipcMain.handle('settings:save', saveSettings);
     ipcMain.handle('sharepoint:fetchJobs', fetchLeadList);
     ipcMain.handle('sharepoint:getJobsCache', () => loadJobCache());
+    ipcMain.handle('sharepoint:fetchJobEquipment', fetchJobEquipment);
     ipcMain.handle('sharepoint:logout', async () => {
         const cachePath = getCachePath();
         if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);

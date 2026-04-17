@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     fetchJobs: () => ipcRenderer.invoke('sharepoint:fetchJobs'),
     getJobsCache: () => ipcRenderer.invoke('sharepoint:getJobsCache'),
     fetchInventory: () => ipcRenderer.invoke('sharepoint:fetchInventory'),
+    fetchJobEquipment: (jobNumber) => ipcRenderer.invoke('sharepoint:fetchJobEquipment', jobNumber),
     logout: () => ipcRenderer.invoke('sharepoint:logout'),
     determineStandard: (answers) => ipcRenderer.invoke('ai:determineStandard', answers),
     onAuthMessage: (callback) => ipcRenderer.on('auth-message', (_event, value) => callback(value)),

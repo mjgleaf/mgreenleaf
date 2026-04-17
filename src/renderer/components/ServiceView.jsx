@@ -320,7 +320,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
             const updatedJob = {
                 ...existingJob,
-                dataSets: [newDataSet],
+                dataSets: [...(existingJob.dataSets || []), newDataSet],
                 metadata: { ...existingJob.metadata, ...extraMetadata }
             };
             // Clean up legacy single data field
@@ -403,6 +403,36 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         return () => { if (companionPollRef.current) clearInterval(companionPollRef.current); };
     }, [companionRunning]);
 
+    // Equipment list for the Companion: sourced from Load Out List × HydroWates Inventory (with certs)
+    const [equipmentItems, setEquipmentItems] = useState([]);
+    const [equipmentLoading, setEquipmentLoading] = useState(false);
+    const [equipmentError, setEquipmentError] = useState(null);
+
+    useEffect(() => {
+        const jobNumber = selectedSharePointJob?.QuoteNum || selectedSharePointJob?.JobNum;
+        if (!jobNumber || !getElectronAPI().fetchJobEquipment) {
+            setEquipmentItems([]);
+            setEquipmentError(null);
+            return;
+        }
+        let cancelled = false;
+        setEquipmentLoading(true);
+        setEquipmentError(null);
+        getElectronAPI().fetchJobEquipment(jobNumber)
+            .then(items => {
+                if (!cancelled) setEquipmentItems(items || []);
+            })
+            .catch(err => {
+                if (!cancelled) {
+                    console.error('[EQUIPMENT] Fetch failed:', err);
+                    setEquipmentError(err?.message || 'Failed to load equipment');
+                    setEquipmentItems([]);
+                }
+            })
+            .finally(() => { if (!cancelled) setEquipmentLoading(false); });
+        return () => { cancelled = true; };
+    }, [selectedSharePointJob]);
+
     // Sync session state to companion server whenever key state changes
     useEffect(() => {
         if (companionRunning && getElectronAPI().companionSyncState) {
@@ -411,9 +441,10 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                 cellCount,
                 isLogging,
                 loggedSamples: loggedData.length,
+                equipmentItems,
             });
         }
-    }, [companionRunning, selectedTags, cellCount, isLogging, loggedData.length]);
+    }, [companionRunning, selectedTags, cellCount, isLogging, loggedData.length, equipmentItems]);
 
     useEffect(() => {
         const removeListener = getElectronAPI().onCompanionPhoto?.((photo) => {
@@ -585,7 +616,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                     )}
                     {!isCertPreview && (activeTab === 'report' || activeTab === 'cert') && (
                         <div className="no-print">
-                            <JobSelector jobs={allJobs} activeJobId={activeJobId} onSelect={handleJobChange} />
+                            <JobSelector jobs={allJobs} activeJobId={activeJobId} selectedSharePointJob={selectedSharePointJob} onSelect={handleJobChange} />
                         </div>
                     )}
                     {activeTab === 'live' && (

@@ -111,7 +111,11 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             accept: 'YES',
             testResults: 'PASS',
             hookTested: 'Main Hook',
-            itemDescription: ''
+            itemDescription: '',
+            hookData: Array(10).fill(null).map(() => ({
+                measuredForce: '',
+                accept: 'YES'
+            }))
         })),
         photos: [],
         hasAuxHook: false,
@@ -275,6 +279,19 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     }
                 }
 
+                // Migrate legacy test records: move measuredForce into hookData[0]
+                if (current.tests) {
+                    current.tests = current.tests.map(test => {
+                        if (!test.hookData) {
+                            test.hookData = Array(10).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }));
+                            if (test.measuredForce) {
+                                test.hookData[0] = { measuredForce: String(test.measuredForce), accept: test.accept || 'YES' };
+                            }
+                        }
+                        return test;
+                    });
+                }
+
                 // Metadata always takes priority when data changes
                 if (job?.metadata) {
                     current = {
@@ -306,6 +323,12 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         // Auto-fill first record ONLY if it has never been set (null = untouched)
                         if (updatedTests[0].measuredForce === null) {
                             updatedTests[0].measuredForce = stats.maxWeight.toFixed(0);
+                        }
+                        // Also auto-fill hookData[0] for the first test
+                        if (updatedTests[0].hookData && !updatedTests[0].hookData[0]?.measuredForce) {
+                            const newHookData = [...updatedTests[0].hookData];
+                            newHookData[0] = { ...newHookData[0], measuredForce: stats.maxWeight.toFixed(0) };
+                            updatedTests[0] = { ...updatedTests[0], hookData: newHookData };
                         }
                         if (updatedTests[0].localTime === null) {
                             updatedTests[0].localTime = stats.peakTime;
@@ -356,6 +379,16 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (onUpdateMetadata) {
             onUpdateMetadata(jobId, { certData: newFormData });
         }
+    };
+
+    const handleTestHookData = (testIndex, hookIndex, field, value) => {
+        const newTests = [...formData.tests];
+        const newHookData = [...(newTests[testIndex].hookData || [])];
+        newHookData[hookIndex] = { ...newHookData[hookIndex], [field]: value };
+        newTests[testIndex] = { ...newTests[testIndex], hookData: newHookData };
+        const newFormData = { ...formData, tests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
 
     const handleHookInput = (index, field, value) => {
@@ -760,26 +793,23 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                         <th>Item Description</th>
                                                         <th style={{ width: '80px' }}>Local Time</th>
                                                         <th style={{ width: '80px' }}>Test Dur.</th>
-                                                        <th style={{ width: '100px' }}>Measured Force</th>
+                                                        {(formData.hooks || []).map((hook, hIdx) => (
+                                                            <th key={hIdx} style={{ width: '95px', fontSize: '0.65rem' }}>{hook.name || `Hook ${hIdx + 1}`}</th>
+                                                        ))}
+                                                        <th style={{ width: '95px', fontSize: '0.65rem' }}>Total</th>
                                                         <th style={{ width: '60px' }}>Accept</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
                                                     <tr>
-                                                        <td></td>
-                                                        <td className="text-left" style={{ paddingBottom: '8px' }}>
-                                                            {(formData.hooks || []).map((hook, hIdx) => (
-                                                                <div key={hIdx} style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
-                                                                    <div><strong style={{ color: '#1a3a6c' }}>{hook.name || `Hook ${hIdx + 1}`}:</strong></div>
-                                                                    <div><strong style={{ color: '#555' }}>Manufacturer:</strong> {hook.manufacturer || 'N/A'}</div>
-                                                                    <div><strong style={{ color: '#555' }}>S/N:</strong> {hook.serial || 'N/A'}</div>
-                                                                    <div><strong style={{ color: '#555' }}>WLL:</strong> {hook.wll || 'N/A'}</div>
-                                                                </div>
-                                                            ))}
+                                                        <td colSpan={4 + (formData.hooks || []).length + 2} className="text-left" style={{ paddingBottom: '8px' }}>
                                                             <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <div><strong style={{ color: '#555' }}>Crane Manufacturer:</strong> {formData.equipmentManufacturer || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>Crane S/N:</strong> {formData.equipmentSerial || 'N/A'}</div>
+                                                                <div><strong style={{ color: '#555' }}>Crane WLL:</strong> {formData.equipmentWll || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Target Test Load:</strong> {formData.targetLoad || 'N/A'}</div>
                                                             </div>
-                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
+                                                            <div style={{ marginBottom: '4px', marginTop: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
                                                             <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
                                                                 <strong>Procedure Summary:</strong><br />
                                                                 <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
@@ -787,10 +817,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                 </div>
                                                             </div>
                                                         </td>
-                                                        <td></td>
-                                                        <td></td>
-                                                        <td></td>
-                                                        <td></td>
                                                     </tr>
                                                     {formData.tests
                                                         .slice(0, parseInt(formData.numTests))
@@ -802,16 +828,30 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                         {test.itemDescription || formData.equipmentTested}
                                                                     </div>
                                                                     <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
-                                                                        <strong>Hook:</strong> {test.hookTested || 'Main Hook'} | <strong>Type:</strong> {test.loadType}
-                                                                    </div>
-                                                                    <div className="font-bold" style={{ marginTop: '4px', color: '#1a3a6c', fontSize: '0.8rem' }}>
-                                                                        TEST LOAD: {test.wllPercentage || '100%'} WLL
+                                                                        <strong>Type:</strong> {test.loadType} | <strong>TEST LOAD:</strong> {test.wllPercentage || '100%'} WLL
                                                                     </div>
                                                                 </td>
                                                                 <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.localTime}</td>
                                                                 <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.testDuration}</td>
-                                                                <td className="force-val" style={{ fontSize: '1rem', verticalAlign: 'middle', paddingTop: '8px' }}>{test.measuredForce} lbs</td>
-                                                                <td className="accept-val" style={{ color: test.testResults === 'PASS' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                                {(formData.hooks || []).map((hook, hIdx) => {
+                                                                    const force = test.hookData && test.hookData[hIdx]?.measuredForce;
+                                                                    return (
+                                                                        <td key={hIdx} className="force-val" style={{ fontSize: '0.85rem', verticalAlign: 'middle', paddingTop: '8px' }}>
+                                                                            {force && String(force).trim() ? `${force} lbs` : '--'}
+                                                                        </td>
+                                                                    );
+                                                                })}
+                                                                <td className="force-val" style={{ fontSize: '0.85rem', fontWeight: 700, verticalAlign: 'middle', paddingTop: '8px' }}>
+                                                                    {(() => {
+                                                                        const total = (formData.hooks || []).reduce((sum, _, hIdx) => {
+                                                                            const raw = test.hookData && test.hookData[hIdx]?.measuredForce;
+                                                                            const val = parseFloat(String(raw || '').replace(/,/g, ''));
+                                                                            return sum + (isNaN(val) ? 0 : val);
+                                                                        }, 0);
+                                                                        return total > 0 ? `${total.toLocaleString()} lbs` : '--';
+                                                                    })()}
+                                                                </td>
+                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
                                                             </tr>
                                                         ))}
                                                 </tbody>
@@ -929,9 +969,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <>
                                 <div className="cert-main-page">
                                     {mainSections.map(id => renderSectionContent(id))}
-                                </div>
-                                <div className="cert-attachments">
-                                    {otherSections.map(id => renderSectionContent(id))}
                                 </div>
                             </>
                         );
@@ -1252,6 +1289,18 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     {certLayout === 'crane-hook' && (
                     <div className="form-row">
                         <div className="form-group">
+                            <label>Crane Manufacturer</label>
+                            <input name="equipmentManufacturer" value={formData.equipmentManufacturer} onChange={handleInput} placeholder="e.g. Mi-Jack, Liebherr..." />
+                        </div>
+                        <div className="form-group">
+                            <label>Crane S/N</label>
+                            <input name="equipmentSerial" value={formData.equipmentSerial} onChange={handleInput} placeholder="Serial Number..." />
+                        </div>
+                        <div className="form-group">
+                            <label>Crane WLL</label>
+                            <input name="equipmentWll" value={formData.equipmentWll} onChange={handleInput} placeholder="e.g. 100 Tons" />
+                        </div>
+                        <div className="form-group">
                             <label>Target Test Load</label>
                             <input name="targetLoad" value={formData.targetLoad} onChange={handleInput} placeholder="e.g. 50 Tons" />
                         </div>
@@ -1301,22 +1350,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                         <option value="Aux Hook" />
                                         <option value="Whip Hook" />
                                     </datalist>
-                                </div>
-                                <div className="form-group" style={{ flex: 1 }}>
-                                    <label>Manufacturer</label>
-                                    <input
-                                        value={hook.manufacturer || ''}
-                                        onChange={(e) => handleHookInput(index, 'manufacturer', e.target.value)}
-                                        placeholder="Manufacturer..."
-                                    />
-                                </div>
-                                <div className="form-group" style={{ flex: 1 }}>
-                                    <label>S/N</label>
-                                    <input
-                                        value={hook.serial || ''}
-                                        onChange={(e) => handleHookInput(index, 'serial', e.target.value)}
-                                        placeholder="Serial Number..."
-                                    />
                                 </div>
                                 <div className="form-group" style={{ flex: 1 }}>
                                     <label>WLL</label>
@@ -1450,35 +1483,12 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             />
                         </div>
                         <div className="form-group">
-                            <label>Measured Force (lbs)</label>
-                            <input
-                                value={test.measuredForce || ''}
-                                onChange={(e) => handleTestInput(index, 'measuredForce', e.target.value)}
-                                className={index === 0 ? "auto-input" : ""}
-                                placeholder="Enter Load..."
-                            />
-                        </div>
-                        <div className="form-group">
                             <label>Accept</label>
                             <select value={test.accept} onChange={(e) => handleTestInput(index, 'accept', e.target.value)}>
                                 <option value="YES">YES</option>
                                 <option value="NO">NO</option>
                                 <option value="N/A">N/A</option>
                             </select>
-                        </div>
-                        <div className="form-group">
-                            <label>Hook Tested</label>
-                            <input
-                                list={`hook-suggestions-${index}`}
-                                value={test.hookTested || ''}
-                                onChange={(e) => handleTestInput(index, 'hookTested', e.target.value)}
-                                placeholder="Select or type hook..."
-                            />
-                            <datalist id={`hook-suggestions-${index}`}>
-                                {(formData.hooks || []).map((h, hIdx) => (
-                                    <option key={hIdx} value={h.name || `Hook ${hIdx + 1}`} />
-                                ))}
-                            </datalist>
                         </div>
                         <div className="form-group" style={{ flex: 2 }}>
                             <label>Item Description (Overrides Header)</label>
@@ -1509,6 +1519,40 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             </datalist>
                         </div>
                     </div>
+
+                    {/* Per-hook measured forces — only shown when multiple hooks are being tested */}
+                    {(formData.hooks || []).length > 1 && (
+                    <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                        <div style={{ fontSize: '0.78rem', color: 'var(--accent)', fontWeight: 700, marginBottom: '10px' }}>MEASURED FORCE PER HOOK</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min((formData.hooks || []).length, 3)}, 1fr)`, gap: '10px' }}>
+                            {(formData.hooks || []).map((hook, hIdx) => (
+                                <div key={hIdx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                    <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        {hook.name || `Hook ${hIdx + 1}`}
+                                        {hook.wll && <span style={{ opacity: 0.6 }}> (WLL: {hook.wll})</span>}
+                                    </label>
+                                    <div style={{ display: 'flex', gap: '6px' }}>
+                                        <input
+                                            value={(test.hookData && test.hookData[hIdx]?.measuredForce) || ''}
+                                            onChange={(e) => handleTestHookData(index, hIdx, 'measuredForce', e.target.value)}
+                                            className={index === 0 && hIdx === 0 ? "auto-input" : ""}
+                                            placeholder="lbs"
+                                            style={{ flex: 1, fontSize: '0.85rem' }}
+                                        />
+                                        <select
+                                            value={(test.hookData && test.hookData[hIdx]?.accept) || 'YES'}
+                                            onChange={(e) => handleTestHookData(index, hIdx, 'accept', e.target.value)}
+                                            style={{ width: '65px', fontSize: '0.78rem' }}
+                                        >
+                                            <option value="YES">YES</option>
+                                            <option value="NO">NO</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                    )}
                 </section>
             ))}
 
