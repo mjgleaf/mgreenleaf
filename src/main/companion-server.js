@@ -25,6 +25,10 @@ class CompanionServer {
         this.isRunning = false;
         this.clients = new Set();
 
+        // Map of equipment id → { certUrl, name } — used by /api/cert/:id proxy.
+        // Populated from updateSessionState() whenever equipmentItems is synced.
+        this.equipmentIndex = new Map();
+
         // State that gets broadcast
         this.currentState = {
             devices: {},
@@ -73,6 +77,28 @@ class CompanionServer {
         // API to get current state (for initial load)
         this.app.get('/api/state', (req, res) => {
             res.json(this.currentState);
+        });
+
+        // Proxy a certificate file from SharePoint through the laptop.
+        // The laptop holds the MSAL token; phones don't need SharePoint auth.
+        this.app.get('/api/cert/:id', async (req, res) => {
+            const id = req.params.id;
+            if (!this.onCertRequest) {
+                res.status(503).type('text/plain').send('Certificate proxy not wired');
+                return;
+            }
+            try {
+                const { buffer, contentType, filename } = await this.onCertRequest(id);
+                const safeName = String(filename || 'certificate').replace(/[\r\n"]/g, '');
+                res.setHeader('Content-Type', contentType || 'application/octet-stream');
+                res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
+                res.setHeader('Cache-Control', 'private, max-age=300');
+                res.end(buffer);
+            } catch (err) {
+                const status = err.statusCode || 502;
+                console.error(`[COMPANION] /api/cert/${id} failed (${status}):`, err.message);
+                res.status(status).type('text/plain').send(err.message || 'Cert fetch failed');
+            }
         });
 
         // API to get server info
@@ -143,6 +169,20 @@ class CompanionServer {
     // Update session state
     updateSessionState(state) {
         Object.assign(this.currentState, state);
+        // Rebuild equipment index whenever the list is synced so /api/cert/:id works.
+        if (Array.isArray(state.equipmentItems)) {
+            this.equipmentIndex.clear();
+            state.equipmentItems.forEach(item => {
+                if (item && item.id && item.certUrl && item.certUrl !== 'HAS_ATTACHMENT') {
+                    this.equipmentIndex.set(String(item.id), {
+                        certUrl: item.certUrl,
+                        certName: item.certName || null,
+                        name: item.name || 'Certificate'
+                    });
+                }
+            });
+            console.log(`[COMPANION] Equipment index updated: ${this.equipmentIndex.size} item(s) with certs`);
+        }
         this.broadcast('state', this.currentState);
     }
 
