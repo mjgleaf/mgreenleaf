@@ -1570,7 +1570,7 @@ const tokenCachePlugin = {
     },
 };
 
-async function getAccessToken() {
+async function getAccessToken(scopes = ['Files.Read.All', 'Sites.Read.All']) {
     const settings = loadSettings();
 
     // START CHANGE: Prioritize Settings over .env and fix client reset
@@ -1612,10 +1612,10 @@ async function getAccessToken() {
         const accounts = await tokenCache.getAllAccounts();
 
         if (accounts.length > 0) {
-            console.log(`Found ${accounts.length} cached accounts. Attempting silent token for: ${accounts[0].username}`);
+            console.log(`Found ${accounts.length} cached accounts. Attempting silent token for: ${accounts[0].username} (scopes: ${scopes.join(', ')})`);
             const silentRequest = {
                 account: accounts[0],
-                scopes: ['Files.Read.All', 'Sites.Read.All'],
+                scopes: scopes,
             };
             try {
                 const result = await msalClient.acquireTokenSilent(silentRequest);
@@ -1641,7 +1641,7 @@ async function getAccessToken() {
         console.log('   Tenant ID:', tenantId);
 
         const authResponse = await msalClient.acquireTokenByDeviceCode({
-            scopes: ['Files.Read.All', 'Sites.Read.All'],
+            scopes: scopes,
             // No timeout - use MSAL default (900 seconds / 15 minutes)
             deviceCodeCallback: (response) => {
                 console.log('📱 Device code received:', response.userCode);
@@ -1915,6 +1915,416 @@ async function fetchLeadList() {
 
 // --- Inventory List Fetch (Removed: Moved to Greens App) ---
 
+// Resolve the configured SharePoint site ID (with search fallback)
+async function resolveSharePointSiteId(config) {
+    const settings = loadSettings();
+    const sharepointSite = settings.sharepointSite || 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles';
+    const urlObj = new URL(sharepointSite);
+    const hostname = urlObj.hostname;
+    const sitePath = urlObj.pathname.startsWith('/') ? urlObj.pathname : `/${urlObj.pathname}`;
+    try {
+        const res = await axios.get(`https://graph.microsoft.com/v1.0/sites/${hostname}:${sitePath}`, config);
+        return res.data.id;
+    } catch (e) {
+        const searchRes = await axios.get(`https://graph.microsoft.com/v1.0/sites?search=${path.basename(sitePath)}`, config);
+        const found = searchRes.data.value.find(s => s.name === path.basename(sitePath));
+        if (!found) throw new Error(`Site at ${sharepointSite} not found`);
+        return found.id;
+    }
+}
+
+// Generic: fetch all items from a list by display name, returning raw fields
+async function fetchListItemsRaw(listName) {
+    const token = await getAccessToken();
+    const config = { headers: { Authorization: `Bearer ${token}` } };
+    const siteId = await resolveSharePointSiteId(config);
+    const listsRes = await axios.get(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists`, config);
+    const list = listsRes.data.value.find(l => l.name === listName || l.displayName === listName);
+    if (!list) {
+        const available = listsRes.data.value.map(l => l.displayName || l.name).join(', ');
+        throw new Error(`List "${listName}" not found. Available: ${available}`);
+    }
+    const items = [];
+    let nextUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${list.id}/items?expand=fields&$top=200`;
+    while (nextUrl) {
+        const res = await axios.get(nextUrl, config);
+        items.push(...res.data.value);
+        nextUrl = res.data['@odata.nextLink'] || null;
+    }
+    return { items, listId: list.id, siteId };
+}
+
+// Read a field value from a SharePoint item, trying multiple candidate keys (case-insensitive, strip non-alnum)
+function readField(fields, candidates) {
+    if (!fields) return undefined;
+    const keys = Object.keys(fields);
+    const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+    for (const cand of candidates) {
+        const target = norm(cand);
+        const key = keys.find(k => norm(k) === target);
+        if (key !== undefined) {
+            const val = fields[key];
+            if (val && typeof val === 'object' && val.Value) return val.Value;
+            return val;
+        }
+    }
+    return undefined;
+}
+
+// Detect a truthy "has certificate" signal on an inventory item.
+// Looks for any field whose name contains "cert" or "attach" with a truthy/URL value.
+function extractCertUrl(fields) {
+    if (!fields) return null;
+    for (const [key, val] of Object.entries(fields)) {
+        const lk = key.toLowerCase();
+        if (!lk.includes('cert') && !lk.includes('attach')) continue;
+        if (!val) continue;
+        if (typeof val === 'string' && val.trim()) return val.trim();
+        if (typeof val === 'object') {
+            if (val.Url) return val.Url;
+            if (val.url) return val.url;
+            if (val.Value) return typeof val.Value === 'string' ? val.Value : null;
+        }
+        if (val === true) return 'HAS_ATTACHMENT';
+    }
+    return null;
+}
+
+// Fetch equipment associated with a job: Load Out List × HydroWates Inventory.
+// Each matched item's cert (if any) is retrieved via SharePoint list-item attachments.
+async function fetchJobEquipment(event, jobNumber) {
+    if (!jobNumber) return [];
+    const jobKey = String(jobNumber).trim().toLowerCase();
+    console.log(`[EQUIPMENT] Fetching equipment for job "${jobNumber}"`);
+
+    const [loadOut, inventory] = await Promise.all([
+        fetchListItemsRaw('Load Out List'),
+        fetchListItemsRaw('HydroWates Inventory')
+    ]);
+
+    // Column diagnostic
+    if (loadOut.items[0]?.fields) {
+        console.log('[EQUIPMENT] Load Out columns:', Object.keys(loadOut.items[0].fields).join(', '));
+    }
+    if (inventory.items[0]?.fields) {
+        console.log('[EQUIPMENT] Inventory columns:', Object.keys(inventory.items[0].fields).join(', '));
+    }
+    console.log(`[EQUIPMENT] Total rows — LoadOut: ${loadOut.items.length}, Inventory: ${inventory.items.length}`);
+    inventory.items.slice(0, 5).forEach((r, i) => {
+        console.log(`[EQUIPMENT]   Inv[${i}] id="${r.id}" SerialNumber="${r.fields?.SerialNumber || ''}" Title="${r.fields?.Title || ''}" Description="${r.fields?.Description || ''}"`);
+    });
+
+    const jobCandidates = ['JobNumber', 'JobNum', 'Job', 'QuoteNum', 'Quote Number', 'Quote_x0023_', 'Title'];
+    // Load Out uses CartItmID as a lookup → Inventory.id (SharePoint row ID).
+    // Also accept AssemblySN / Title as fallback keys for secondary matching.
+    const loadOutKeyCandidates = ['CartItmID', 'CartItemID', 'AssemblySN'];
+    const nameCandidates = ['Description', 'Title', 'EquipmentName', 'ItemName', 'Name'];
+    const wllCandidates = ['WorkingLoadLimit', 'WLL', 'Capacity', 'Rating'];
+    const inventorySerialCandidates = ['SerialNumber', 'AssemblySerialNumber', 'Serial', 'Title'];
+
+    // Filter Load Out to rows matching the job number
+    const loadOutRows = loadOut.items.filter(item => {
+        const val = readField(item.fields, jobCandidates);
+        if (val === undefined || val === null) return false;
+        return String(val).trim().toLowerCase() === jobKey;
+    });
+    console.log(`[EQUIPMENT] Load Out rows matching job: ${loadOutRows.length}`);
+    loadOutRows.slice(0, 10).forEach((r, i) => {
+        const k = readField(r.fields, loadOutKeyCandidates);
+        const d = readField(r.fields, nameCandidates);
+        console.log(`[EQUIPMENT]   LoadOut[${i}] CartItmID="${k}" desc="${d}"`);
+    });
+
+    // Index inventory by multiple keys so we can match by row ID, serial, or assembly SN.
+    // Primary: SharePoint row id (matches LoadOut.CartItmID). Secondary: SerialNumber / AssemblySerialNumber.
+    const invByKey = new Map();
+    const addKey = (k, invRow) => {
+        if (k === undefined || k === null) return;
+        const norm = String(k).trim().toLowerCase();
+        if (!norm) return;
+        if (!invByKey.has(norm)) invByKey.set(norm, invRow);
+    };
+    let totalInvWithAnyKey = 0;
+    for (const item of inventory.items) {
+        const invRow = { fields: item.fields, id: item.id };
+        let added = false;
+        // SharePoint row ID — primary match target for CartItmID
+        if (item.id) { addKey(item.id, invRow); added = true; }
+        // Also allow SerialNumber / AssemblySerialNumber / Title
+        for (const cand of inventorySerialCandidates) {
+            const v = item.fields?.[cand];
+            if (v) { addKey(v, invRow); added = true; }
+        }
+        if (added) totalInvWithAnyKey++;
+    }
+    console.log(`[EQUIPMENT] Inventory indexed: ${totalInvWithAnyKey} row(s), ${invByKey.size} unique key(s)`);
+
+    // Intersect
+    const matched = [];
+    const unmatchedKeys = [];
+    for (const row of loadOutRows) {
+        // Try CartItmID first; if not present, try AssemblySN; if neither, fallback to Title
+        const key = readField(row.fields, loadOutKeyCandidates) ?? readField(row.fields, ['Title']);
+        if (key === undefined || key === null || String(key).trim() === '') continue;
+        const lookup = String(key).trim().toLowerCase();
+        const invRow = invByKey.get(lookup);
+        if (!invRow) { unmatchedKeys.push(String(key)); continue; }
+        // Prefer the actual SerialNumber from Inventory for display
+        const invSerial = readField(invRow.fields, inventorySerialCandidates) || String(key);
+        matched.push({ loadOutRow: row, invRow, serial: String(invSerial) });
+    }
+    console.log(`[EQUIPMENT] Matched ${matched.length} of ${loadOutRows.length} load-out rows to inventory.`);
+    if (unmatchedKeys.length) {
+        console.log(`[EQUIPMENT] Unmatched keys: ${unmatchedKeys.slice(0, 10).join(', ')}${unmatchedKeys.length > 10 ? '…' : ''}`);
+    }
+
+    // For each match, try to resolve a real cert URL.
+    // Priority: (1) FolderPath-based lookup (most reliable on this tenant),
+    // (2) extractCertUrl from direct fields,
+    // (3) SharePoint list-item attachments via Graph.
+    const equipment = [];
+    // Log sample FolderPath values so we can see what they look like
+    matched.slice(0, 3).forEach((m, i) => {
+        console.log(`[EQUIPMENT]   Match[${i}] invId=${m.invRow.id} FolderPath="${m.invRow.fields?.FolderPath || ''}" Attachments=${m.invRow.fields?.Attachments}`);
+    });
+
+    for (const m of matched) {
+        let certUrl = null;
+        let attachmentName = null;
+        const fp = m.invRow.fields?.FolderPath;
+
+        // Strategy 1: FolderPath → list first PDF in that document-library folder
+        if (fp && typeof fp === 'string' && fp.trim()) {
+            try {
+                const r = await fetchFolderCert(inventory.siteId, fp);
+                if (r) { certUrl = r.url; attachmentName = r.name; }
+            } catch (e) {
+                console.warn(`[EQUIPMENT] FolderPath fetch failed (invId=${m.invRow.id} path="${fp}"):`, e.response?.status || e.message);
+            }
+        }
+
+        // Strategy 2: extract from fields
+        if (!certUrl) {
+            const ex = extractCertUrl(m.invRow.fields);
+            if (ex && ex !== 'HAS_ATTACHMENT') certUrl = ex;
+        }
+
+        // Strategy 3: list-item attachments
+        if (!certUrl) {
+            try {
+                const att = await fetchListItemAttachment(inventory.siteId, inventory.listId, m.invRow.id);
+                if (att) { certUrl = att.url; attachmentName = att.name; }
+            } catch (e) {
+                console.warn(`[EQUIPMENT] Attachment fetch failed (invId=${m.invRow.id}):`, e.response?.status || e.message);
+            }
+        }
+
+        // Only include items that have a real, fetchable cert URL
+        if (!certUrl || certUrl === 'HAS_ATTACHMENT') continue;
+        equipment.push({
+            id: m.loadOutRow.id,
+            name: readField(m.loadOutRow.fields, nameCandidates) || readField(m.invRow.fields, nameCandidates) || `Equipment ${m.serial}`,
+            serial: m.serial,
+            wll: readField(m.loadOutRow.fields, wllCandidates) || readField(m.invRow.fields, wllCandidates) || '',
+            certUrl,
+            certName: attachmentName || null,
+            inventoryId: m.invRow.id
+        });
+    }
+    console.log(`[EQUIPMENT] Final equipment: ${equipment.length} items with certs (from ${matched.length} matched)`);
+    return equipment;
+}
+
+// Fetch the first attachment for a SharePoint list item using SharePoint REST API.
+// Requires a SharePoint-audience token (different from Graph), obtained via getSharePointToken().
+// Graph v1.0 does NOT directly expose list-item attachments; SP REST is the correct path.
+async function fetchListItemAttachment(siteId, listId, itemId) {
+    const settings = loadSettings();
+    const siteUrl = settings.sharepointSite || 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles';
+    const urlObj = new URL(siteUrl);
+    const spHost = urlObj.hostname;          // hydrowates.sharepoint.com
+    const spBase = `https://${spHost}${urlObj.pathname}`;  // https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles
+
+    let spToken;
+    try {
+        spToken = await getSharePointToken(spHost);
+    } catch (e) {
+        console.warn(`[EQUIPMENT] Cannot get SharePoint token: ${e.message}`);
+        return null;
+    }
+
+    const listGuid = String(listId).replace(/[{}]/g, '');
+    try {
+        const res = await axios.get(
+            `${spBase}/_api/web/lists(guid'${listGuid}')/items(${itemId})/AttachmentFiles`,
+            {
+                headers: {
+                    Authorization: `Bearer ${spToken}`,
+                    Accept: 'application/json;odata=nometadata'
+                }
+            }
+        );
+        const files = res.data?.value || [];
+        if (files.length === 0) return null;
+        const file = files[0];  // first attachment
+        const serverRelativeUrl = file.ServerRelativeUrl;
+        // Return the SP REST download endpoint — Bearer-token-accessible, unlike direct file URLs.
+        const downloadEndpoint = `${spBase}/_api/web/GetFileByServerRelativeUrl('${encodeURIComponent(serverRelativeUrl)}')/$value`;
+        return {
+            url: downloadEndpoint,
+            name: file.FileName || 'attachment',
+        };
+    } catch (e) {
+        console.warn(`[EQUIPMENT] SP REST AttachmentFiles failed for item ${itemId}: ${e.response?.status || e.message}`);
+        return null;
+    }
+}
+
+// Fetch a cert PDF from a document-library folder via Graph drive API, given a FolderPath.
+// The FolderPath field typically looks like "/Shared Documents/..." (site-relative).
+// Graph's /drive/root is already the "Shared Documents" library, so strip that prefix.
+async function fetchFolderCert(siteId, folderPath) {
+    const token = await getAccessToken();
+    const config = { headers: { Authorization: `Bearer ${token}` } };
+    let p = String(folderPath).trim();
+    // Strip leading/trailing slashes
+    p = p.replace(/^\/+/, '').replace(/\/+$/, '');
+    // Strip "Shared Documents/" or "Documents/" prefix (those are the drive itself)
+    p = p.replace(/^Shared Documents\//i, '').replace(/^Documents\//i, '');
+    if (!p) return null;
+    const encoded = p.split('/').map(s => encodeURIComponent(s)).join('/');
+    const res = await axios.get(
+        `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/root:/${encoded}:/children`,
+        config
+    );
+    const children = res.data?.value || [];
+    // Prefer PDFs, fall back to images or any file
+    const file = children.find(c => c.file && /\.pdf$/i.test(c.name))
+              || children.find(c => c.file && /\.(png|jpe?g)$/i.test(c.name))
+              || children.find(c => c.file);
+    if (file) {
+        const dl = file['@microsoft.graph.downloadUrl'] || file.webUrl;
+        return { url: dl, name: file.name };
+    }
+    return null;
+}
+
+// Acquire a SharePoint-audience access token (for SP REST API).
+// Tries silent acquisition first; if the SharePoint scope wasn't previously consented,
+// falls back to device code flow for SP scope.
+let cachedSpToken = { value: null, expiresAt: 0, host: null };
+async function getSharePointToken(spHost) {
+    const now = Date.now();
+    if (cachedSpToken.value && cachedSpToken.host === spHost && cachedSpToken.expiresAt > now + 60000) {
+        return cachedSpToken.value;
+    }
+    const spScope = `https://${spHost}/AllSites.Read`;
+    try {
+        const tok = await getAccessToken([spScope]);
+        cachedSpToken = { value: tok, host: spHost, expiresAt: now + 55 * 60 * 1000 };
+        return tok;
+    } catch (e) {
+        // Try .default scope as a fallback
+        const tok = await getAccessToken([`https://${spHost}/.default`]);
+        cachedSpToken = { value: tok, host: spHost, expiresAt: now + 55 * 60 * 1000 };
+        return tok;
+    }
+}
+
+// Download a certificate file. Strategies in order:
+// (1) For *.sharepoint.com URLs — use SP-audience token to download directly
+// (2) Unauthenticated GET (works for pre-signed Graph downloadUrls)
+// (3) Authenticated GET with Graph token
+// (4) Graph /shares lookup for SharePoint webUrls
+async function fetchCertFile(certUrl, preferredName) {
+    if (!certUrl || certUrl === 'HAS_ATTACHMENT') {
+        throw new Error('No certificate URL available');
+    }
+
+    const parseFilename = (headers, fallback) => {
+        const cd = headers['content-disposition'] || '';
+        const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+        return m ? decodeURIComponent(m[1]) : (fallback || 'certificate');
+    };
+
+    const errors = {};
+
+    // (1) SharePoint URL → use SP token
+    try {
+        const u = new URL(certUrl);
+        if (u.hostname.endsWith('.sharepoint.com')) {
+            const spToken = await getSharePointToken(u.hostname);
+            const res = await axios.get(certUrl, {
+                responseType: 'arraybuffer',
+                headers: { Authorization: `Bearer ${spToken}`, Accept: '*/*' }
+            });
+            return {
+                buffer: Buffer.from(res.data),
+                contentType: res.headers['content-type'] || guessMimeFromName(preferredName),
+                filename: preferredName || parseFilename(res.headers, 'certificate'),
+            };
+        }
+    } catch (e) {
+        errors.sp = e.response?.status || e.message;
+    }
+
+    // (2) Unauthenticated GET
+    try {
+        const res = await axios.get(certUrl, { responseType: 'arraybuffer' });
+        return {
+            buffer: Buffer.from(res.data),
+            contentType: res.headers['content-type'] || guessMimeFromName(preferredName),
+            filename: preferredName || parseFilename(res.headers, 'certificate'),
+        };
+    } catch (e) { errors.direct = e.response?.status || e.message; }
+
+    // (3) Authenticated GET with Graph token
+    try {
+        const token = await getAccessToken();
+        const res = await axios.get(certUrl, {
+            responseType: 'arraybuffer',
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        return {
+            buffer: Buffer.from(res.data),
+            contentType: res.headers['content-type'] || guessMimeFromName(preferredName),
+            filename: preferredName || parseFilename(res.headers, 'certificate'),
+        };
+    } catch (e) { errors.auth = e.response?.status || e.message; }
+
+    // (4) Graph /shares lookup
+    try {
+        const token = await getAccessToken();
+        const b64 = Buffer.from(certUrl, 'utf8').toString('base64')
+            .replace(/=+$/, '').replace(/\//g, '_').replace(/\+/g, '-');
+        const shareId = 'u!' + b64;
+        const metaRes = await axios.get(
+            `https://graph.microsoft.com/v1.0/shares/${shareId}/driveItem`,
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const item = metaRes.data;
+        const dlUrl = item['@microsoft.graph.downloadUrl'];
+        const name = item.name || preferredName || 'certificate.pdf';
+        const mime = item.file?.mimeType || guessMimeFromName(name);
+        if (dlUrl) {
+            const dl = await axios.get(dlUrl, { responseType: 'arraybuffer' });
+            return { buffer: Buffer.from(dl.data), contentType: mime, filename: name };
+        }
+    } catch (e) { errors.shares = e.response?.status || e.message; }
+
+    console.error('[CERT] All fetch strategies failed:', errors);
+    throw new Error(`Certificate fetch failed: ${JSON.stringify(errors)}`);
+}
+
+function guessMimeFromName(name) {
+    const lower = String(name || '').toLowerCase();
+    if (lower.endsWith('.pdf')) return 'application/pdf';
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    return 'application/octet-stream';
+}
+
 function saveData(event, data, filename) {
     const dataPath = getDataPath(filename);
     try {
@@ -2029,6 +2439,7 @@ app.whenReady().then(() => {
     ipcMain.handle('settings:save', saveSettings);
     ipcMain.handle('sharepoint:fetchJobs', fetchLeadList);
     ipcMain.handle('sharepoint:getJobsCache', () => loadJobCache());
+    ipcMain.handle('sharepoint:fetchJobEquipment', fetchJobEquipment);
     ipcMain.handle('sharepoint:logout', async () => {
         const cachePath = getCachePath();
         if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);
@@ -2250,6 +2661,25 @@ app.whenReady().then(() => {
     companionServer.onPhotoReceived = (photo) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('companion-photo-received', photo);
+        }
+    };
+
+    // When a phone requests a certificate, fetch it via Graph using the laptop's MSAL token
+    companionServer.onCertRequest = async (id) => {
+        const entry = companionServer.equipmentIndex.get(String(id));
+        if (!entry) {
+            const err = new Error('Unknown equipment id');
+            err.statusCode = 404;
+            throw err;
+        }
+        console.log(`[COMPANION] Cert requested id=${id} name="${entry.name}"`);
+        try {
+            return await fetchCertFile(entry.certUrl, entry.certName);
+        } catch (e) {
+            console.error(`[COMPANION] Cert fetch failed for id=${id}:`, e.message);
+            const err = new Error(e.message || 'Cert fetch failed');
+            err.statusCode = 502;
+            throw err;
         }
     };
 

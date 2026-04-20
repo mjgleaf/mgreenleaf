@@ -1,7 +1,7 @@
 {
   "name": "oscar-dashboard",
   "private": true,
-  "version": "1.0.2",
+  "version": "1.0.7",
   "main": "src/main/main.js",
   "description": "Professional reporting and live data dashboard for T24 load cells.",
   "author": "Antigravity",
@@ -17,6 +17,7 @@
   "build": {
     "appId": "com.oscar.dashboard",
     "productName": "OSCAR Dashboard",
+    "artifactName": "OSCAR-Dashboard-${version}-${arch}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -36,7 +37,7 @@
     ],
     "publish": {
       "provider": "github",
-      "owner": "mgreenleaf",
+      "owner": "mjgleaf",
       "repo": "mgreenleaf"
     },
     "win": {

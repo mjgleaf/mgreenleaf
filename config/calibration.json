@@ -2,6 +2,7 @@
     "6762": {
         "skipTonnesConversion": true
     },
+    "7856": {},
     "8147": {
         "skipTonnesConversion": true
     },
@@ -15,6 +16,13 @@
         "useFloatLE": true
     },
     "E229": {
+        "skipTonnesConversion": true
+    },
+    "6C0C": {},
+    "7F19": {
+        "skipTonnesConversion": true
+    },
+    "E13E": {
         "skipTonnesConversion": true
     }
 }
