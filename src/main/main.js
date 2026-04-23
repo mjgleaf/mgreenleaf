@@ -2510,7 +2510,8 @@ app.whenReady().then(() => {
         return companionServer.getStatus();
     });
 
-    ipcMain.handle('companion:syncState', (event, state) => {
+    ipcMain.handle('companion:updateState', (event, state) => {
+        if (!state || typeof state !== 'object') return { success: false };
         if (companionServer.isRunning) {
             // Always include current device status from main process
             companionServer.updateSessionState({ ...state, deviceStatus });
@@ -2525,6 +2526,20 @@ app.whenReady().then(() => {
     ipcMain.handle('companion:clearPhotos', () => {
         companionServer.clearPhotos();
         return { success: true };
+    });
+
+    ipcMain.handle('companion:getLeaks', () => {
+        return companionServer.getLeaks();
+    });
+
+    ipcMain.handle('companion:clearLeaks', () => {
+        companionServer.clearLeaks();
+        return { success: true };
+    });
+
+    ipcMain.handle('companion:deleteLeak', (event, id) => {
+        const removed = companionServer.deleteLeak(id);
+        return { success: removed };
     });
 
     // When a phone sends a photo, notify the renderer
