@@ -24,8 +24,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
     fetchJobs: () => ipcRenderer.invoke('sharepoint:fetchJobs'),
     getJobsCache: () => ipcRenderer.invoke('sharepoint:getJobsCache'),
-    fetchInventory: () => ipcRenderer.invoke('sharepoint:fetchInventory'),
-    fetchJobEquipment: (jobNumber) => ipcRenderer.invoke('sharepoint:fetchJobEquipment', jobNumber),
+    fetchEquipmentForJob: (jobNum) => ipcRenderer.invoke('sharepoint:fetchEquipmentForJob', jobNum),
     logout: () => ipcRenderer.invoke('sharepoint:logout'),
     determineStandard: (answers) => ipcRenderer.invoke('ai:determineStandard', answers),
     onAuthMessage: (callback) => ipcRenderer.on('auth-message', (_event, value) => callback(value)),
@@ -56,13 +55,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     companionStart: () => ipcRenderer.invoke('companion:start'),
     companionStop: () => ipcRenderer.invoke('companion:stop'),
     companionStatus: () => ipcRenderer.invoke('companion:status'),
-    companionSyncState: (state) => ipcRenderer.invoke('companion:syncState', state),
     companionGetPhotos: () => ipcRenderer.invoke('companion:getPhotos'),
     companionClearPhotos: () => ipcRenderer.invoke('companion:clearPhotos'),
+    companionUpdateState: (partial) => ipcRenderer.invoke('companion:updateState', partial),
+    companionGetLeaks: () => ipcRenderer.invoke('companion:getLeaks'),
+    companionClearLeaks: () => ipcRenderer.invoke('companion:clearLeaks'),
+    companionDeleteLeak: (id) => ipcRenderer.invoke('companion:deleteLeak', id),
     onCompanionPhoto: (callback) => {
         const handler = (_event, value) => callback(value);
         ipcRenderer.on('companion-photo-received', handler);
         return () => ipcRenderer.removeListener('companion-photo-received', handler);
+    },
+    onCompanionLeak: (callback) => {
+        const handler = (_event, value) => callback(value);
+        ipcRenderer.on('companion-leak-received', handler);
+        return () => ipcRenderer.removeListener('companion-leak-received', handler);
     },
 
     // Certificate Registry

@@ -181,6 +181,128 @@
         .photo-thumb { width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
         .gps-info { font-size: 0.72rem; color: var(--dim); margin-top: 8px; text-align: center; }
 
+        /* Leaks tab */
+        .leaks-section { padding: 16px; }
+        .leaks-section h3 { font-size: 0.9rem; margin-bottom: 12px; }
+        .leak-log-btn {
+            width: 100%;
+            padding: 14px;
+            border-radius: 12px;
+            border: none;
+            background: var(--red);
+            color: #fff;
+            font-size: 0.95rem;
+            font-weight: 700;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .leak-log-btn:active { opacity: 0.8; }
+        .leak-list { display: flex; flex-direction: column; gap: 10px; }
+        .leak-item {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+            display: flex;
+            gap: 10px;
+            padding: 10px;
+        }
+        .leak-thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 8px; flex-shrink: 0; }
+        .leak-body { flex: 1; min-width: 0; }
+        .leak-desc { font-size: 0.85rem; color: var(--text); line-height: 1.3; margin-bottom: 6px; word-wrap: break-word; }
+        .leak-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 0.7rem; color: var(--dim); }
+        .severity-badge {
+            font-size: 0.62rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 700;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+        .severity-badge.minor { background: rgba(74,222,128,0.15); color: var(--green); }
+        .severity-badge.moderate { background: rgba(240,184,0,0.15); color: var(--yellow); }
+        .severity-badge.severe { background: rgba(248,113,113,0.2); color: var(--red); }
+        .leak-delete {
+            background: none;
+            border: none;
+            color: var(--dim);
+            cursor: pointer;
+            font-size: 1rem;
+            padding: 4px 8px;
+        }
+        .leak-delete:active { color: var(--red); }
+        .leak-empty { text-align: center; color: var(--dim); padding: 30px 16px; font-size: 0.85rem; }
+        .leak-form { display: flex; flex-direction: column; gap: 12px; }
+        .leak-form-field { display: flex; flex-direction: column; gap: 6px; }
+        .leak-form-label { font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.8px; font-weight: 600; }
+        .leak-form textarea,
+        .leak-form input[type="text"] {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            padding: 10px 12px;
+            font-size: 0.9rem;
+            font-family: inherit;
+        }
+        .leak-form textarea { resize: vertical; min-height: 80px; }
+        .leak-form input[type="text"] { min-height: 0; }
+        .leak-form textarea:focus,
+        .leak-form input:focus { outline: none; border-color: var(--yellow); }
+        .severity-choices { display: flex; gap: 8px; }
+        .severity-choice {
+            flex: 1;
+            padding: 10px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-align: center;
+        }
+        .severity-choice.selected.minor { background: rgba(74,222,128,0.15); border-color: var(--green); color: var(--green); }
+        .severity-choice.selected.moderate { background: rgba(240,184,0,0.15); border-color: var(--yellow); color: var(--yellow); }
+        .severity-choice.selected.severe { background: rgba(248,113,113,0.2); border-color: var(--red); color: var(--red); }
+        .leak-photo-preview {
+            width: 100%;
+            aspect-ratio: 4/3;
+            object-fit: cover;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+        }
+        .leak-photo-placeholder {
+            width: 100%;
+            aspect-ratio: 4/3;
+            border: 2px dashed var(--border);
+            border-radius: 10px;
+            background: var(--card);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--dim);
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+        .leak-form-actions { display: flex; gap: 8px; margin-top: 8px; }
+        .leak-form-actions button {
+            flex: 1;
+            padding: 12px;
+            border-radius: 10px;
+            border: none;
+            font-size: 0.9rem;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .leak-submit { background: var(--red); color: #fff; }
+        .leak-submit:disabled { background: var(--elevated); color: var(--dim); cursor: not-allowed; }
+        .leak-cancel { background: var(--card); color: var(--text); border: 1px solid var(--border) !important; }
+
         /* Equipment tab */
         .equipment-section { padding: 16px; }
         .equipment-section h3 { font-size: 0.9rem; margin-bottom: 12px; }
@@ -193,24 +315,18 @@
         }
         .equip-item-name { font-weight: 700; font-size: 0.85rem; }
         .equip-item-meta { font-size: 0.72rem; color: var(--dim); margin-top: 2px; }
+        .equip-item-certs { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+        .equip-cert-link {
+            display: inline-block;
+            font-size: 0.72rem;
+            padding: 4px 8px;
+            border-radius: 6px;
+            background: var(--accent, #2563eb);
+            color: white;
+            text-decoration: none;
+        }
+        .equip-no-certs { font-size: 0.7rem; color: var(--dim); font-style: italic; }
         .equip-empty { text-align: center; color: var(--dim); padding: 40px 16px; font-size: 0.85rem; }
-        .equip-item.clickable { cursor: pointer; }
-        .equip-item.clickable:active { background: rgba(255,255,255,0.04); }
-        .equip-item-cert-hint { font-size: 0.68rem; color: var(--yellow); margin-top: 4px; }
-        .cert-modal-backdrop {
-            position: fixed; inset: 0; background: rgba(0,0,0,0.85);
-            z-index: 100; display: flex; flex-direction: column;
-        }
-        .cert-modal-header {
-            display: flex; align-items: center; justify-content: space-between;
-            padding: 10px 14px; background: var(--card); border-bottom: 1px solid var(--border);
-        }
-        .cert-modal-title { font-size: 0.85rem; font-weight: 700; }
-        .cert-modal-close {
-            background: transparent; border: 1px solid var(--border); color: var(--text);
-            border-radius: 6px; padding: 6px 12px; font-size: 0.8rem; cursor: pointer;
-        }
-        .cert-modal-frame { flex: 1; border: 0; background: #fff; }
 
         /* Content area padding for fixed bottom tabs */
         .content { padding-bottom: 70px; }
@@ -248,7 +364,10 @@
             activeTab: 'live',
             photos: [],
             gps: null,
-            equipmentItems: []
+            equipmentItems: [],
+            leaks: [],
+            leakDraft: null,
+            leakSubmitting: false
         };
 
         let ws = null;
@@ -311,7 +430,7 @@
                     state.devices[msg.data.tag] = msg.data;
                     lastPacketTimes[msg.data.tag] = Date.now();
                     recalcTotal();
-                    render();
+                    if (!state.leakDraft) render();
                     break;
                 case 'overload':
                     state.overloadTags = msg.data.tags || [];
@@ -325,6 +444,20 @@
                 case 'state':
                     Object.assign(state, msg.data);
                     render();
+                    break;
+                case 'leak':
+                    if (!(state.leaks || []).some(l => l.id === msg.data.id)) {
+                        state.leaks = [...(state.leaks || []), msg.data];
+                        if (!state.leakDraft) render();
+                    }
+                    break;
+                case 'leakDeleted':
+                    state.leaks = (state.leaks || []).filter(l => l.id !== msg.data.id);
+                    if (!state.leakDraft) render();
+                    break;
+                case 'leaksCleared':
+                    state.leaks = [];
+                    if (!state.leakDraft) render();
                     break;
             }
         }
@@ -374,6 +507,105 @@
             input.click();
         }
 
+        // ── Leak Reporting ──
+        function startLeakDraft() {
+            state.leakDraft = { dataUrl: null, description: '', severity: 'minor', serial: '' };
+            render();
+        }
+
+        function cancelLeakDraft() {
+            state.leakDraft = null;
+            render();
+        }
+
+        function captureLeakPhoto() {
+            if (!state.leakDraft) return;
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'image/*';
+            input.capture = 'environment';
+            input.onchange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                    if (!state.leakDraft) return;
+                    state.leakDraft.dataUrl = ev.target.result;
+                    render();
+                };
+                reader.readAsDataURL(file);
+            };
+            input.click();
+        }
+
+        function setLeakSeverity(sev) {
+            if (!state.leakDraft) return;
+            state.leakDraft.severity = sev;
+            render();
+        }
+
+        function setLeakDescription(value) {
+            if (!state.leakDraft) return;
+            state.leakDraft.description = value;
+            updateLeakSubmitState();
+        }
+
+        function setLeakSerial(value) {
+            if (!state.leakDraft) return;
+            state.leakDraft.serial = value;
+        }
+
+        function updateLeakSubmitState() {
+            const btn = document.querySelector('.leak-submit');
+            if (!btn) return;
+            const d = state.leakDraft;
+            const canSubmit = !!(d && d.dataUrl && d.description.trim().length > 0 && !state.leakSubmitting);
+            btn.disabled = !canSubmit;
+        }
+
+        function submitLeak() {
+            const draft = state.leakDraft;
+            if (!draft || !draft.dataUrl || !draft.description.trim()) return;
+            state.leakSubmitting = true;
+            render();
+            fetch('/api/leak', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    dataUrl: draft.dataUrl,
+                    description: draft.description.trim(),
+                    severity: draft.severity,
+                    serial: (draft.serial || '').trim(),
+                    timestamp: Date.now(),
+                    gps: state.gps
+                })
+            })
+            .then(r => r.json())
+            .then(resp => {
+                state.leakSubmitting = false;
+                state.leakDraft = null;
+                // The leak will arrive via WS broadcast, but ensure it's here in case WS is slow
+                if (resp && resp.leak && !(state.leaks || []).some(l => l.id === resp.leak.id)) {
+                    state.leaks = [...(state.leaks || []), resp.leak];
+                }
+                render();
+            })
+            .catch(() => {
+                state.leakSubmitting = false;
+                render();
+                alert('Failed to submit leak. Check connection and try again.');
+            });
+        }
+
+        function deleteLeak(id) {
+            if (!confirm('Delete this leak report?')) return;
+            fetch('/api/leaks/' + encodeURIComponent(id), { method: 'DELETE' })
+                .catch(() => {});
+            // Optimistic update — broadcast will also sync
+            state.leaks = (state.leaks || []).filter(l => l.id !== id);
+            render();
+        }
+
         // ── Signal Helpers ──
         function getSignal(tag) {
             if (!tag || !lastPacketTimes[tag]) return 'stale';
@@ -401,6 +633,12 @@
                 return;
             }
 
+            // Preserve focus state for inputs that may be replaced
+            const activeEl = document.activeElement;
+            const preservedId = activeEl && activeEl.id ? activeEl.id : null;
+            const preservedStart = preservedId && typeof activeEl.selectionStart === 'number' ? activeEl.selectionStart : null;
+            const preservedEnd = preservedId && typeof activeEl.selectionEnd === 'number' ? activeEl.selectionEnd : null;
+
             let html = renderHeader();
 
             if (state.overloadTags && state.overloadTags.length > 0) {
@@ -413,6 +651,8 @@
                 html += renderLiveTab();
             } else if (state.activeTab === 'camera') {
                 html += renderCameraTab();
+            } else if (state.activeTab === 'leaks') {
+                html += renderLeaksTab();
             } else if (state.activeTab === 'equipment') {
                 html += renderEquipmentTab();
             }
@@ -421,6 +661,17 @@
             html += renderTabs();
 
             app.innerHTML = html;
+
+            // Restore focus + cursor after DOM rebuild
+            if (preservedId) {
+                const restored = document.getElementById(preservedId);
+                if (restored) {
+                    restored.focus();
+                    if (preservedStart !== null) {
+                        try { restored.setSelectionRange(preservedStart, preservedEnd); } catch (e) {}
+                    }
+                }
+            }
 
             // Bind events after render
             bindEvents();
@@ -541,19 +792,123 @@
             return html;
         }
 
+        function renderLeaksTab() {
+            if (state.leakDraft) return renderLeakForm();
+
+            const leaks = state.leaks || [];
+            let html = `
+                <div class="leaks-section">
+                    <h3>Waterbag Leaks</h3>
+                    <p style="font-size:0.78rem;color:var(--dim);margin-bottom:12px;">Log any leaks found during the job. Reports are sent to OSCAR for follow-up after the job.</p>
+                    <button class="leak-log-btn" onclick="window.__startLeakDraft()">
+                        <span style="font-size:1.3rem;">&#128167;</span> Log New Leak
+                    </button>
+            `;
+
+            if (leaks.length === 0) {
+                html += `<div class="leak-empty">No leaks logged yet.</div>`;
+            } else {
+                html += '<div class="leak-list">';
+                leaks.slice().reverse().forEach(leak => {
+                    const sev = leak.severity || 'minor';
+                    const sevLabel = sev.charAt(0).toUpperCase() + sev.slice(1);
+                    const when = new Date(leak.timestamp).toLocaleString(undefined, {
+                        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+                    });
+                    html += `
+                        <div class="leak-item">
+                            <img src="${leak.dataUrl}" class="leak-thumb" />
+                            <div class="leak-body">
+                                ${leak.serial ? `<div style="font-size:0.72rem;color:var(--yellow);font-weight:700;margin-bottom:4px;">S/N: ${escapeHtml(leak.serial)}</div>` : ''}
+                                <div class="leak-desc">${escapeHtml(leak.description || '')}</div>
+                                <div class="leak-meta">
+                                    <span class="severity-badge ${sev}">${sevLabel}</span>
+                                    <span>${when}</span>
+                                    ${leak.gps ? `<span>&#128205; ${leak.gps.lat.toFixed(4)}, ${leak.gps.lng.toFixed(4)}</span>` : ''}
+                                </div>
+                            </div>
+                            <button class="leak-delete" onclick="window.__deleteLeak('${leak.id}')" title="Delete">&times;</button>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+            }
+
+            html += '</div>';
+            return html;
+        }
+
+        function renderLeakForm() {
+            const draft = state.leakDraft;
+            const canSubmit = draft.dataUrl && draft.description.trim().length > 0 && !state.leakSubmitting;
+            return `
+                <div class="leaks-section">
+                    <h3>Log Leak</h3>
+                    <div class="leak-form">
+                        <div class="leak-form-field">
+                            <div class="leak-form-label">Photo</div>
+                            ${draft.dataUrl
+                                ? `<img src="${draft.dataUrl}" class="leak-photo-preview" onclick="window.__captureLeakPhoto()" />`
+                                : `<div class="leak-photo-placeholder" onclick="window.__captureLeakPhoto()">&#128247; Tap to take photo</div>`}
+                        </div>
+                        <div class="leak-form-field">
+                            <div class="leak-form-label">Waterbag Serial #</div>
+                            <input id="leak-serial-input" type="text" placeholder="e.g. WB-12345" oninput="window.__setLeakSerial(this.value)" value="${escapeHtml(draft.serial || '')}" />
+                        </div>
+                        <div class="leak-form-field">
+                            <div class="leak-form-label">Description</div>
+                            <textarea id="leak-desc-input" placeholder="Where is the leak? How bad is it?" oninput="window.__setLeakDescription(this.value)">${escapeHtml(draft.description || '')}</textarea>
+                        </div>
+                        <div class="leak-form-field">
+                            <div class="leak-form-label">Severity</div>
+                            <div class="severity-choices">
+                                <div class="severity-choice minor ${draft.severity === 'minor' ? 'selected' : ''}" onclick="window.__setLeakSeverity('minor')">Minor</div>
+                                <div class="severity-choice moderate ${draft.severity === 'moderate' ? 'selected' : ''}" onclick="window.__setLeakSeverity('moderate')">Moderate</div>
+                                <div class="severity-choice severe ${draft.severity === 'severe' ? 'selected' : ''}" onclick="window.__setLeakSeverity('severe')">Severe</div>
+                            </div>
+                        </div>
+                        <div class="leak-form-actions">
+                            <button class="leak-cancel" onclick="window.__cancelLeakDraft()" ${state.leakSubmitting ? 'disabled' : ''}>Cancel</button>
+                            <button class="leak-submit" onclick="window.__submitLeak()" ${canSubmit ? '' : 'disabled'}>${state.leakSubmitting ? 'Submitting…' : 'Submit Leak'}</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
         function renderEquipmentTab() {
             let html = `<div class="equipment-section"><h3>Job Equipment</h3>`;
             if (state.equipmentItems && state.equipmentItems.length > 0) {
                 html += '<div class="equip-list">';
-                state.equipmentItems.forEach((item, idx) => {
-                    const hasCert = item.certUrl && item.certUrl !== 'HAS_ATTACHMENT';
-                    const clickable = hasCert ? 'clickable' : '';
-                    const hint = hasCert ? '<div class="equip-item-cert-hint">Tap to view certificate &rarr;</div>' : '';
+                state.equipmentItems.forEach(item => {
+                    const name = item.description || item.name || 'Unknown';
+                    const serial = item.serialNumber || item.serial || '';
+                    const meta = [
+                        serial ? 'S/N: ' + escapeHtml(serial) : '',
+                        item.wll ? 'WLL: ' + escapeHtml(item.wll) : '',
+                        item.quantity ? 'Qty: ' + escapeHtml(item.quantity) : ''
+                    ].filter(Boolean).join(' | ');
+                    let certsHtml = '';
+                    if (item.certificates && item.certificates.length > 0) {
+                        certsHtml = '<div class="equip-item-certs">' +
+                            item.certificates.map(c =>
+                                `<a class="equip-cert-link" href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.name)}</a>`
+                            ).join('') +
+                        '</div>';
+                    } else {
+                        certsHtml = '<div class="equip-item-certs equip-no-certs">No certificates on file</div>';
+                    }
                     html += `
-                        <div class="equip-item ${clickable}" data-cert-index="${idx}">
-                            <div class="equip-item-name">${item.name || item.description || 'Unknown'}</div>
-                            <div class="equip-item-meta">${item.serial ? 'S/N: ' + item.serial : ''}${item.wll ? ' | WLL: ' + item.wll : ''}</div>
-                            ${hint}
+                        <div class="equip-item">
+                            <div class="equip-item-name">${escapeHtml(name)}</div>
+                            <div class="equip-item-meta">${meta}</div>
+                            ${certsHtml}
                         </div>
                     `;
                 });
@@ -565,26 +920,6 @@
             return html;
         }
 
-        function openCertModal(item) {
-            if (!item || !item.certUrl || item.certUrl === 'HAS_ATTACHMENT') return;
-            const existing = document.getElementById('cert-modal');
-            if (existing) existing.remove();
-            const modal = document.createElement('div');
-            modal.id = 'cert-modal';
-            modal.className = 'cert-modal-backdrop';
-            modal.innerHTML = `
-                <div class="cert-modal-header">
-                    <div class="cert-modal-title">${(item.name || 'Certificate').replace(/</g, '&lt;')}</div>
-                    <button class="cert-modal-close" data-action="close-cert">Close</button>
-                </div>
-                <iframe class="cert-modal-frame" src="${item.certUrl}" allow="fullscreen"></iframe>
-            `;
-            document.body.appendChild(modal);
-            modal.addEventListener('click', (e) => {
-                if (e.target.dataset.action === 'close-cert') modal.remove();
-            });
-        }
-
         function renderTabs() {
             return `
                 <div class="tabs">
@@ -593,6 +928,9 @@
                     </button>
                     <button class="tab ${state.activeTab === 'camera' ? 'active' : ''}" data-tab="camera">
                         <span class="tab-icon">&#128247;</span>Camera
+                    </button>
+                    <button class="tab ${state.activeTab === 'leaks' ? 'active' : ''}" data-tab="leaks">
+                        <span class="tab-icon">&#128167;</span>Leaks
                     </button>
                     <button class="tab ${state.activeTab === 'equipment' ? 'active' : ''}" data-tab="equipment">
                         <span class="tab-icon">&#128218;</span>Equipment
@@ -608,22 +946,23 @@
                     render();
                 };
             });
-            document.querySelectorAll('.equip-item.clickable').forEach(el => {
-                el.onclick = () => {
-                    const idx = parseInt(el.dataset.certIndex, 10);
-                    const item = (state.equipmentItems || [])[idx];
-                    openCertModal(item);
-                };
-            });
         }
 
         // Expose for onclick
         window.__capturePhoto = capturePhoto;
+        window.__startLeakDraft = startLeakDraft;
+        window.__cancelLeakDraft = cancelLeakDraft;
+        window.__captureLeakPhoto = captureLeakPhoto;
+        window.__setLeakSeverity = setLeakSeverity;
+        window.__setLeakDescription = setLeakDescription;
+        window.__setLeakSerial = setLeakSerial;
+        window.__submitLeak = submitLeak;
+        window.__deleteLeak = deleteLeak;
 
         // ── Init ──
         getGPS();
         setInterval(getGPS, 30000); // Refresh GPS every 30s
-        setInterval(() => { if (state.wsConnected) render(); }, 1000); // Refresh signal indicators
+        setInterval(() => { if (state.wsConnected && !state.leakDraft) render(); }, 1000); // Refresh signal indicators
         connectWS();
         render();
 

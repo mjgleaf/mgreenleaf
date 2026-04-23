@@ -25,10 +25,6 @@ class CompanionServer {
         this.isRunning = false;
         this.clients = new Set();
 
-        // Map of equipment id → { certUrl, name } — used by /api/cert/:id proxy.
-        // Populated from updateSessionState() whenever equipmentItems is synced.
-        this.equipmentIndex = new Map();
-
         // State that gets broadcast
         this.currentState = {
             devices: {},
@@ -41,8 +37,13 @@ class CompanionServer {
             totalLoad: 0,
             wllThreshold: 0,
             overloadTags: [],
-            deviceStatus: 'disconnected'
+            deviceStatus: 'disconnected',
+            leaks: [],
+            equipmentItems: []
         };
+        this.leaks = [];
+        this.certCache = new Map(); // id -> { name, buffer, mime }
+        this.certCacheSeq = 0;
 
         this._setupRoutes();
         this._setupWebSocket();
@@ -74,31 +75,57 @@ class CompanionServer {
             res.json(this.photos);
         });
 
+        // API endpoint for phone to log a leak
+        this.app.post('/api/leak', (req, res) => {
+            const { dataUrl, description, severity, timestamp, gps, serial } = req.body;
+            if (!dataUrl || !description) {
+                res.status(400).json({ error: 'Photo and description are required' });
+                return;
+            }
+            const leak = {
+                id: `leak-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                dataUrl,
+                description,
+                severity: severity || 'minor',
+                serial: (serial || '').trim() || null,
+                timestamp: timestamp || Date.now(),
+                gps: gps || null
+            };
+            this.leaks.push(leak);
+            this.currentState.leaks = this.leaks;
+            console.log(`[COMPANION] Leak logged (${this.leaks.length} total): ${description.slice(0, 40)}`);
+            this.broadcast('leak', leak);
+            if (this.onLeakReceived) this.onLeakReceived(leak);
+            if (this.onLeaksChanged) this.onLeaksChanged(this.leaks);
+            res.json({ success: true, leak, count: this.leaks.length });
+        });
+
+        // API to get all leaks
+        this.app.get('/api/leaks', (req, res) => {
+            res.json(this.leaks);
+        });
+
+        // API to delete a leak
+        this.app.delete('/api/leaks/:id', (req, res) => {
+            const removed = this.deleteLeak(req.params.id);
+            res.json({ success: removed, count: this.leaks.length });
+        });
+
         // API to get current state (for initial load)
         this.app.get('/api/state', (req, res) => {
             res.json(this.currentState);
         });
 
-        // Proxy a certificate file from SharePoint through the laptop.
-        // The laptop holds the MSAL token; phones don't need SharePoint auth.
-        this.app.get('/api/cert/:id', async (req, res) => {
-            const id = req.params.id;
-            if (!this.onCertRequest) {
-                res.status(503).type('text/plain').send('Certificate proxy not wired');
+        // API to serve a cached equipment certificate attachment
+        this.app.get('/api/cert/:id', (req, res) => {
+            const entry = this.certCache.get(req.params.id);
+            if (!entry) {
+                res.status(404).json({ error: 'Certificate not found' });
                 return;
             }
-            try {
-                const { buffer, contentType, filename } = await this.onCertRequest(id);
-                const safeName = String(filename || 'certificate').replace(/[\r\n"]/g, '');
-                res.setHeader('Content-Type', contentType || 'application/octet-stream');
-                res.setHeader('Content-Disposition', `inline; filename="${safeName}"`);
-                res.setHeader('Cache-Control', 'private, max-age=300');
-                res.end(buffer);
-            } catch (err) {
-                const status = err.statusCode || 502;
-                console.error(`[COMPANION] /api/cert/${id} failed (${status}):`, err.message);
-                res.status(status).type('text/plain').send(err.message || 'Cert fetch failed');
-            }
+            res.setHeader('Content-Type', entry.mime || 'application/octet-stream');
+            res.setHeader('Content-Disposition', `inline; filename="${entry.name.replace(/"/g, '')}"`);
+            res.send(entry.buffer);
         });
 
         // API to get server info
@@ -169,21 +196,19 @@ class CompanionServer {
     // Update session state
     updateSessionState(state) {
         Object.assign(this.currentState, state);
-        // Rebuild equipment index whenever the list is synced so /api/cert/:id works.
-        if (Array.isArray(state.equipmentItems)) {
-            this.equipmentIndex.clear();
-            state.equipmentItems.forEach(item => {
-                if (item && item.id && item.certUrl && item.certUrl !== 'HAS_ATTACHMENT') {
-                    this.equipmentIndex.set(String(item.id), {
-                        certUrl: item.certUrl,
-                        certName: item.certName || null,
-                        name: item.name || 'Certificate'
-                    });
-                }
-            });
-            console.log(`[COMPANION] Equipment index updated: ${this.equipmentIndex.size} item(s) with certs`);
-        }
         this.broadcast('state', this.currentState);
+    }
+
+    // Cache a certificate attachment for the companion to fetch via /api/cert/:id
+    addCertCache({ name, buffer, mime }) {
+        this.certCacheSeq += 1;
+        const id = `c${this.certCacheSeq}`;
+        this.certCache.set(id, { name, buffer, mime: mime || 'application/octet-stream' });
+        return id;
+    }
+
+    clearCertCache() {
+        this.certCache.clear();
     }
 
     // Get local network IPs
@@ -253,6 +278,34 @@ class CompanionServer {
 
     getPhotos() {
         return this.photos;
+    }
+
+    getLeaks() {
+        return this.leaks;
+    }
+
+    clearLeaks() {
+        this.leaks = [];
+        this.currentState.leaks = [];
+        this.broadcast('leaksCleared', {});
+        if (this.onLeaksChanged) this.onLeaksChanged(this.leaks);
+    }
+
+    deleteLeak(id) {
+        const before = this.leaks.length;
+        this.leaks = this.leaks.filter(l => l.id !== id);
+        this.currentState.leaks = this.leaks;
+        const removed = before !== this.leaks.length;
+        if (removed) {
+            this.broadcast('leakDeleted', { id });
+            if (this.onLeaksChanged) this.onLeaksChanged(this.leaks);
+        }
+        return removed;
+    }
+
+    setLeaks(leaks) {
+        this.leaks = Array.isArray(leaks) ? leaks : [];
+        this.currentState.leaks = this.leaks;
     }
 }
 

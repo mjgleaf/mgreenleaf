@@ -67,6 +67,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [companionPort, setCompanionPort] = useState(3001);
     const [companionClients, setCompanionClients] = useState(0);
     const [companionPhotos, setCompanionPhotos] = useState([]);
+    const [companionLeaks, setCompanionLeaks] = useState([]);
     const companionPollRef = useRef(null);
 
     // --- Lifted Live Telemetry & Logging State ---
@@ -262,6 +263,38 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         }
     }, [selectedTags, cellCount, deviceStatus]);
 
+    // Sync session state to companion server (mobile PWA)
+    useEffect(() => {
+        getElectronAPI().companionUpdateState({
+            selectedTags,
+            cellCount,
+            isLogging
+        });
+    }, [selectedTags, cellCount, isLogging]);
+
+    // Push equipment + certificates for the selected SharePoint job to the companion.
+    useEffect(() => {
+        const api = getElectronAPI();
+        if (!api.fetchEquipmentForJob || !api.companionUpdateState) return;
+        const jobNum = selectedSharePointJob?.QuoteNum || selectedSharePointJob?.JobNum || selectedSharePointJob?.JobNumber;
+        if (!jobNum) {
+            api.companionUpdateState({ equipmentItems: [] });
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const equipmentItems = await api.fetchEquipmentForJob(jobNum);
+                if (cancelled) return;
+                await api.companionUpdateState({ equipmentItems: equipmentItems || [] });
+            } catch (err) {
+                console.error('Failed to load equipment for job', jobNum, err);
+                if (!cancelled) api.companionUpdateState({ equipmentItems: [] });
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [selectedSharePointJob]);
+
     const handleRecover = async () => {
         if (getElectronAPI().loadRecovery) {
             const data = await getElectronAPI().loadRecovery();
@@ -320,7 +353,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
             const updatedJob = {
                 ...existingJob,
-                dataSets: [...(existingJob.dataSets || []), newDataSet],
+                dataSets: [newDataSet],
                 metadata: { ...existingJob.metadata, ...extraMetadata }
             };
             // Clean up legacy single data field
@@ -403,59 +436,43 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         return () => { if (companionPollRef.current) clearInterval(companionPollRef.current); };
     }, [companionRunning]);
 
-    // Equipment list for the Companion: sourced from Load Out List × HydroWates Inventory (with certs)
-    const [equipmentItems, setEquipmentItems] = useState([]);
-    const [equipmentLoading, setEquipmentLoading] = useState(false);
-    const [equipmentError, setEquipmentError] = useState(null);
-
-    useEffect(() => {
-        const jobNumber = selectedSharePointJob?.QuoteNum || selectedSharePointJob?.JobNum;
-        if (!jobNumber || !getElectronAPI().fetchJobEquipment) {
-            setEquipmentItems([]);
-            setEquipmentError(null);
-            return;
-        }
-        let cancelled = false;
-        setEquipmentLoading(true);
-        setEquipmentError(null);
-        getElectronAPI().fetchJobEquipment(jobNumber)
-            .then(items => {
-                if (!cancelled) setEquipmentItems(items || []);
-            })
-            .catch(err => {
-                if (!cancelled) {
-                    console.error('[EQUIPMENT] Fetch failed:', err);
-                    setEquipmentError(err?.message || 'Failed to load equipment');
-                    setEquipmentItems([]);
-                }
-            })
-            .finally(() => { if (!cancelled) setEquipmentLoading(false); });
-        return () => { cancelled = true; };
-    }, [selectedSharePointJob]);
-
-    // Sync session state to companion server whenever key state changes.
-    // When no SharePoint job is selected, explicitly push an empty equipment list
-    // so a stale list from a prior job isn't cached on connected phones.
-    useEffect(() => {
-        if (companionRunning && getElectronAPI().companionSyncState) {
-            const itemsToSync = selectedSharePointJob ? equipmentItems : [];
-            console.log(`[COMPANION] Syncing state to phones. equipmentItems=${itemsToSync.length}`);
-            getElectronAPI().companionSyncState({
-                selectedTags,
-                cellCount,
-                isLogging,
-                loggedSamples: loggedData.length,
-                equipmentItems: itemsToSync,
-            });
-        }
-    }, [companionRunning, selectedTags, cellCount, isLogging, loggedData.length, equipmentItems, selectedSharePointJob]);
-
     useEffect(() => {
         const removeListener = getElectronAPI().onCompanionPhoto?.((photo) => {
             setCompanionPhotos(prev => [...prev, photo]);
         });
         return () => { if (typeof removeListener === 'function') removeListener(); };
     }, []);
+
+    useEffect(() => {
+        const removeListener = getElectronAPI().onCompanionLeak?.((leak) => {
+            setCompanionLeaks(prev => {
+                if (prev.some(l => l.id === leak.id)) return prev;
+                return [...prev, leak];
+            });
+        });
+        return () => { if (typeof removeListener === 'function') removeListener(); };
+    }, []);
+
+    // Hydrate leaks from disk on mount and whenever companion server toggles
+    useEffect(() => {
+        if (getElectronAPI().companionGetLeaks) {
+            getElectronAPI().companionGetLeaks().then(leaks => {
+                if (Array.isArray(leaks)) setCompanionLeaks(leaks);
+            }).catch(() => {});
+        }
+    }, [companionRunning]);
+
+    const handleDeleteLeak = async (id) => {
+        if (!window.confirm('Delete this leak report?')) return;
+        await getElectronAPI().companionDeleteLeak?.(id);
+        setCompanionLeaks(prev => prev.filter(l => l.id !== id));
+    };
+
+    const handleClearLeaks = async () => {
+        if (!window.confirm('Clear all leak reports?')) return;
+        await getElectronAPI().companionClearLeaks?.();
+        setCompanionLeaks([]);
+    };
 
     const handleCompanionStart = async () => {
         const result = await getElectronAPI().companionStart();
@@ -579,6 +596,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         <button className={`nav-btn ${activeTab === 'import' ? 'active' : ''}`} onClick={() => { setActiveTab('import'); setImportContext(null); }}>Import CSV</button>
                         <button className={`nav-btn ${activeTab === 'report' ? 'active' : ''}`} onClick={() => setActiveTab('report')}>Saved Projects / Reports</button>
                         <button className={`nav-btn ${activeTab === 'cert' ? 'active' : ''}`} onClick={() => setActiveTab('cert')}>Certificate</button>
+                        <button className={`nav-btn ${activeTab === 'leaks' ? 'active' : ''}`} onClick={() => setActiveTab('leaks')}>Leak Logs{companionLeaks.length > 0 ? ` (${companionLeaks.length})` : ''}</button>
                         <button className={`nav-btn ${activeTab === 'companion' ? 'active' : ''}`} onClick={() => setActiveTab('companion')}>
                             📱 Companion{companionRunning ? ` (${companionClients})` : ''}
                         </button>
@@ -620,7 +638,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                     )}
                     {!isCertPreview && (activeTab === 'report' || activeTab === 'cert') && (
                         <div className="no-print">
-                            <JobSelector jobs={allJobs} activeJobId={activeJobId} selectedSharePointJob={selectedSharePointJob} onSelect={handleJobChange} />
+                            <JobSelector jobs={allJobs} activeJobId={activeJobId} onSelect={handleJobChange} />
                         </div>
                     )}
                     {activeTab === 'live' && (
@@ -683,6 +701,88 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             xUnit={xUnit}
                             displayUnit={displayUnit}
                         />
+                    )}
+                    {activeTab === 'leaks' && (
+                        <div style={{ maxWidth: '900px', margin: '0 auto', padding: '1.5rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: '1rem', flexWrap: 'wrap', gap: '12px' }}>
+                                <div>
+                                    <h2 style={{ marginBottom: '0.25rem' }}>💧 Waterbag Leak Logs</h2>
+                                    <p style={{ color: 'var(--text-muted)', margin: 0 }}>
+                                        All leaks reported from the companion app. Reports are saved to disk and persist across sessions.
+                                    </p>
+                                </div>
+                                {companionLeaks.length > 0 && (
+                                    <button className="action-btn secondary" onClick={handleClearLeaks}>Clear All</button>
+                                )}
+                            </div>
+
+                            {companionLeaks.length === 0 ? (
+                                <div style={{
+                                    background: 'var(--bg-card)', borderRadius: '12px', padding: '2.5rem 1.5rem',
+                                    border: '1px dashed var(--border-color)', textAlign: 'center', color: 'var(--text-muted)'
+                                }}>
+                                    <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>💧</div>
+                                    <div style={{ fontSize: '1rem', marginBottom: '0.25rem', color: 'var(--text)' }}>No leak logs yet</div>
+                                    <div style={{ fontSize: '0.85rem' }}>
+                                        Leaks reported from the phone companion will appear here.
+                                    </div>
+                                </div>
+                            ) : (
+                                <div style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                                    gap: '16px'
+                                }}>
+                                    {companionLeaks.slice().reverse().map((leak) => {
+                                        const sev = leak.severity || 'minor';
+                                        const sevColor = sev === 'severe' ? '#ef4444' : sev === 'moderate' ? '#f0b800' : '#4ade80';
+                                        const sevBg = sev === 'severe' ? 'rgba(239,68,68,0.15)' : sev === 'moderate' ? 'rgba(240,184,0,0.15)' : 'rgba(74,222,128,0.15)';
+                                        const when = new Date(leak.timestamp).toLocaleString();
+                                        return (
+                                            <div key={leak.id} style={{
+                                                background: 'var(--bg-card)', borderRadius: '10px', overflow: 'hidden',
+                                                border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column'
+                                            }}>
+                                                <img src={leak.dataUrl} alt="Leak" style={{ width: '100%', aspectRatio: '4/3', objectFit: 'cover', display: 'block' }} />
+                                                <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+                                                        <span style={{
+                                                            fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
+                                                            letterSpacing: '0.5px', padding: '2px 10px', borderRadius: '10px',
+                                                            background: sevBg, color: sevColor
+                                                        }}>{sev}</span>
+                                                        <button
+                                                            onClick={() => handleDeleteLeak(leak.id)}
+                                                            style={{
+                                                                background: 'none', border: 'none', color: 'var(--text-muted)',
+                                                                cursor: 'pointer', fontSize: '1.2rem', padding: '0 4px', lineHeight: 1
+                                                            }}
+                                                            title="Delete"
+                                                        >×</button>
+                                                    </div>
+                                                    {leak.serial && (
+                                                        <div style={{ fontSize: '0.8rem', color: '#f0b800', fontWeight: 700, fontFamily: 'monospace' }}>
+                                                            S/N: {leak.serial}
+                                                        </div>
+                                                    )}
+                                                    <div style={{ fontSize: '0.9rem', color: 'var(--text)', wordBreak: 'break-word', flex: 1 }}>
+                                                        {leak.description}
+                                                    </div>
+                                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                                                        {when}
+                                                    </div>
+                                                    {leak.gps && (
+                                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                                                            📍 {leak.gps.lat.toFixed(5)}, {leak.gps.lng.toFixed(5)}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
                     )}
                     {activeTab === 'companion' && (
                         <div style={{ maxWidth: '800px', margin: '0 auto', padding: '1.5rem' }}>
@@ -772,40 +872,67 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 </div>
                             )}
 
-                            {/* Equipment sync status — helps diagnose empty Equipment tab on phone */}
-                            {companionRunning && (() => {
-                                const jobNum = selectedSharePointJob?.QuoteNum || selectedSharePointJob?.JobNum;
-                                const withCerts = equipmentItems.filter(e => e.certUrl && e.certUrl !== 'HAS_ATTACHMENT').length;
-                                let label, color;
-                                if (!jobNum) {
-                                    label = 'No SharePoint job selected — Equipment tab on phone will be empty';
-                                    color = 'var(--text-muted)';
-                                } else if (equipmentLoading) {
-                                    label = `Loading equipment for job ${jobNum}…`;
-                                    color = 'var(--text-muted)';
-                                } else if (equipmentError) {
-                                    label = `Equipment error: ${equipmentError}`;
-                                    color = '#ef4444';
-                                } else if (equipmentItems.length === 0) {
-                                    label = `Equipment: 0 items matched — check Load Out List serials vs Inventory for job ${jobNum}`;
-                                    color = '#f59e0b';
-                                } else if (withCerts === 0) {
-                                    label = `Equipment: ${equipmentItems.length} item(s) matched, but none have a fetchable certificate`;
-                                    color = '#f59e0b';
-                                } else {
-                                    label = `Equipment: ${equipmentItems.length} item(s) (${withCerts} with cert) — will appear on phone`;
-                                    color = '#22c55e';
-                                }
-                                return (
-                                    <div style={{
-                                        background: 'var(--bg-card)', borderRadius: '12px', padding: '0.75rem 1.25rem',
-                                        border: '1px solid var(--border-color)', marginBottom: '1rem',
-                                        fontSize: '0.85rem', color
-                                    }}>
-                                        📜 {label}
+                            {/* Leaks Received */}
+                            {companionLeaks.length > 0 && (
+                                <div style={{
+                                    background: 'var(--bg-card)', borderRadius: '12px', padding: '1.5rem',
+                                    border: '1px solid var(--border-color)', marginBottom: '1.5rem'
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                                        <h3 style={{ margin: 0 }}>💧 Waterbag Leaks to Fix ({companionLeaks.length})</h3>
+                                        <button className="action-btn secondary" style={{ fontSize: '0.8rem', padding: '4px 12px' }} onClick={handleClearLeaks}>Clear All</button>
                                     </div>
-                                );
-                            })()}
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                                        {companionLeaks.slice().reverse().map((leak) => {
+                                            const sev = leak.severity || 'minor';
+                                            const sevColor = sev === 'severe' ? '#ef4444' : sev === 'moderate' ? '#f0b800' : '#4ade80';
+                                            const sevBg = sev === 'severe' ? 'rgba(239,68,68,0.15)' : sev === 'moderate' ? 'rgba(240,184,0,0.15)' : 'rgba(74,222,128,0.15)';
+                                            const when = new Date(leak.timestamp).toLocaleString();
+                                            return (
+                                                <div key={leak.id} style={{
+                                                    display: 'flex', gap: '12px',
+                                                    background: 'var(--bg-main)', borderRadius: '8px', padding: '10px',
+                                                    border: '1px solid var(--border-color)'
+                                                }}>
+                                                    <img src={leak.dataUrl} alt="Leak" style={{ width: '100px', height: '100px', objectFit: 'cover', borderRadius: '6px', flexShrink: 0 }} />
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                        {leak.serial && (
+                                                            <div style={{ fontSize: '0.75rem', color: '#f0b800', fontWeight: 700, marginBottom: '4px', fontFamily: 'monospace' }}>
+                                                                S/N: {leak.serial}
+                                                            </div>
+                                                        )}
+                                                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '6px', flexWrap: 'wrap' }}>
+                                                            <span style={{
+                                                                fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase',
+                                                                letterSpacing: '0.5px', padding: '2px 10px', borderRadius: '10px',
+                                                                background: sevBg, color: sevColor
+                                                            }}>{sev}</span>
+                                                            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{when}</span>
+                                                            {leak.gps && (
+                                                                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                                                                    📍 {leak.gps.lat.toFixed(5)}, {leak.gps.lng.toFixed(5)}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <div style={{ fontSize: '0.9rem', color: 'var(--text)', wordBreak: 'break-word' }}>
+                                                            {leak.description}
+                                                        </div>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => handleDeleteLeak(leak.id)}
+                                                        style={{
+                                                            background: 'none', border: 'none', color: 'var(--text-muted)',
+                                                            cursor: 'pointer', fontSize: '1.2rem', padding: '4px 8px',
+                                                            alignSelf: 'flex-start'
+                                                        }}
+                                                        title="Delete"
+                                                    >×</button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Photos Received */}
                             {companionPhotos.length > 0 && (

@@ -1,7 +1,7 @@
 {
   "name": "oscar-dashboard",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "main": "src/main/main.js",
   "description": "Professional reporting and live data dashboard for T24 load cells.",
   "author": "Antigravity",
