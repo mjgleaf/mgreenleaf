@@ -18,6 +18,7 @@
     "appId": "com.oscar.dashboard",
     "productName": "OSCAR Dashboard",
     "artifactName": "OSCAR-Dashboard-${version}-${arch}.${ext}",
+    "npmRebuild": false,
     "directories": {
       "output": "release"
     },
@@ -45,7 +46,7 @@
       "repo": "mgreenleaf"
     },
     "win": {
-      "target": ["nsis", "portable"],
+      "target": ["nsis"],
       "icon": "public/icon.png"
     },
     "nsis": {
