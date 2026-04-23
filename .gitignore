@@ -5,6 +5,9 @@ release/
 *.log
 .DS_Store
 
+# Bundled credentials — real values must stay out of git
+config/app-defaults.json
+
 # Exclude large archives and backups
 Oscar.zip
 *- Copy*

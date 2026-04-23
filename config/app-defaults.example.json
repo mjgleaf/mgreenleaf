@@ -1,0 +1,13 @@
+{
+  "clientId": "YOUR_AZURE_AD_CLIENT_ID_HERE",
+  "tenantId": "YOUR_AZURE_AD_TENANT_ID_HERE",
+  "openaiKey": "sk-YOUR_OPENAI_API_KEY_HERE",
+  "sharepointSite": "https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles",
+  "leadListName": "Lead List",
+  "geotabServer": "my.geotab.com",
+  "geotabDatabase": "",
+  "geotabUsername": "",
+  "geotabPassword": "",
+  "chrUsername": "",
+  "chrPassword": ""
+}

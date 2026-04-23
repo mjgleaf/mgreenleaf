@@ -33,6 +33,10 @@
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "config/app-defaults.json",
+        "to": "app-defaults.json"
       }
     ],
     "publish": {

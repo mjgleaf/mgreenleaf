@@ -915,6 +915,20 @@ function decryptValue(value) {
     }
 }
 
+function loadBundledDefaults() {
+    try {
+        const bundledPath = app.isPackaged
+            ? path.join(process.resourcesPath, 'app-defaults.json')
+            : path.resolve(__dirname, '../../config/app-defaults.json');
+        if (fs.existsSync(bundledPath)) {
+            return JSON.parse(fs.readFileSync(bundledPath, 'utf-8'));
+        }
+    } catch (e) {
+        console.error('[SETTINGS] Failed to load bundled defaults:', e);
+    }
+    return {};
+}
+
 function loadSettings() {
     const settingsPath = getDataPath('settings.json');
     let saved = {};
@@ -934,23 +948,27 @@ function loadSettings() {
         }
     }
 
-    // Default configuration (from .env or reasonable defaults)
+    // Values bundled with the app at build time (config/app-defaults.json).
+    // Used as a fallback when the user has no saved settings and no .env is present.
+    const bundled = loadBundledDefaults();
+
+    // Default configuration (from .env, bundled defaults, or reasonable defaults)
     const defaults = {
-        clientId: process.env.AZURE_CLIENT_ID || '',
-        tenantId: process.env.AZURE_TENANT_ID || '',
-        sharepointSite: 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles',
-        leadListName: 'Lead List',
-        openaiKey: process.env.OPENAI_API_KEY || '',
+        clientId: process.env.AZURE_CLIENT_ID || bundled.clientId || '',
+        tenantId: process.env.AZURE_TENANT_ID || bundled.tenantId || '',
+        sharepointSite: bundled.sharepointSite || 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles',
+        leadListName: bundled.leadListName || 'Lead List',
+        openaiKey: process.env.OPENAI_API_KEY || bundled.openaiKey || '',
         t24GroupId: DEFAULT_GROUP_ID,
         t24ScaleFactors: {},
         // C.H. Robinson Navisphere credentials
-        chrUsername: '',
-        chrPassword: '',
+        chrUsername: bundled.chrUsername || '',
+        chrPassword: bundled.chrPassword || '',
         // Geotab Credentials
-        geotabServer: process.env.VITE_GEOTAB_SERVER || 'my.geotab.com',
-        geotabDatabase: process.env.VITE_GEOTAB_DATABASE || '',
-        geotabUsername: process.env.VITE_GEOTAB_USERNAME || '',
-        geotabPassword: process.env.VITE_GEOTAB_PASSWORD || '',
+        geotabServer: process.env.VITE_GEOTAB_SERVER || bundled.geotabServer || 'my.geotab.com',
+        geotabDatabase: process.env.VITE_GEOTAB_DATABASE || bundled.geotabDatabase || '',
+        geotabUsername: process.env.VITE_GEOTAB_USERNAME || bundled.geotabUsername || '',
+        geotabPassword: process.env.VITE_GEOTAB_PASSWORD || bundled.geotabPassword || '',
     };
 
     // Return defaults merged with saved user settings
