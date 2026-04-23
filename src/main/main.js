@@ -662,7 +662,28 @@ const companionServer = new CompanionServer();
 let mainWindow;
 let deviceStatus = 'disconnected';
 
-
+// Leak log persistence
+const LEAKS_FILE = path.join(app.getPath('userData'), 'leaks.json');
+function loadLeaksFromDisk() {
+    try {
+        if (!fs.existsSync(LEAKS_FILE)) return [];
+        const raw = fs.readFileSync(LEAKS_FILE, 'utf8');
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+        console.error('[LEAKS] Failed to load:', e.message);
+        return [];
+    }
+}
+function saveLeaksToDisk(leaks) {
+    try {
+        fs.writeFileSync(LEAKS_FILE, JSON.stringify(leaks, null, 2), 'utf8');
+    } catch (e) {
+        console.error('[LEAKS] Failed to save:', e.message);
+    }
+}
+companionServer.setLeaks(loadLeaksFromDisk());
+companionServer.onLeaksChanged = (leaks) => { saveLeaksToDisk(leaks); };
 
 function scanForDongle() {
     try {
@@ -2546,6 +2567,13 @@ app.whenReady().then(() => {
     companionServer.onPhotoReceived = (photo) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('companion-photo-received', photo);
+        }
+    };
+
+    // When a phone logs a leak, notify the renderer
+    companionServer.onLeakReceived = (leak) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('companion-leak-received', leak);
         }
     };
 
