@@ -5,6 +5,7 @@ import { getElectronAPI } from '../utils/electronAPI';
 import { SignaturePad } from './CustomerView';
 import StandardFinder from './StandardFinder';
 import logo from '../logo.png';
+import { certificateTemplates } from '../data/certificateTemplates';
 
 const MAX_CHART_POINTS = 500;
 
@@ -62,6 +63,98 @@ function CertChart({ stats, yAxisLabel, xAxisLabel, isPrint }) {
         </ResponsiveContainer>
     );
 }
+
+const buildDefaultFormData = () => ({
+    soldTo: '',
+    facilityLocation: '',
+    customerPO: '',
+    buyer: '',
+    projectRef: '',
+    testDate: new Date().toISOString().split('T')[0],
+    projectMgr: '',
+    certNo: '',
+    instruments: [{
+        instrument: '',
+        capacity: '',
+        serialNo: '',
+        dataLink: '',
+        accuracy: ''
+    }],
+    targetLoad: '',
+    equipmentTested: '',
+    equipmentManufacturer: '',
+    equipmentSerial: '',
+    equipmentWll: '',
+    hooks: [{
+        name: 'Main Hook',
+        manufacturer: '',
+        serial: '',
+        wll: ''
+    }],
+    procedureSummary: '',
+    referenceStandards: '',
+    numTests: 1,
+    testResults: 'PASS',
+    tests: Array(10).fill(null).map(() => ({
+        loadType: 'Static',
+        wllPercentage: '100%',
+        measuredForce: null,
+        localTime: null,
+        testDuration: '',
+        accept: 'YES',
+        testResults: 'PASS',
+        hookTested: 'Main Hook',
+        itemDescription: '',
+        hookData: Array(10).fill(null).map(() => ({
+            measuredForce: '',
+            accept: 'YES'
+        }))
+    })),
+    photos: [],
+    hasAuxHook: false,
+    auxHookWll: '',
+    graphPageBreaks: {},
+    sectionOrder: ['header', 'infoGrid', 'testTable', 'footer', 'graphs', 'photos'],
+    beamLength: '',
+    beamManufacturer: '',
+    beamSerial: '',
+    beamWll: '',
+    numPickPoints: 2,
+    pickPoints: Array(6).fill(null).map((_, i) => ({
+        label: `Pick Point ${i + 1}`,
+        position: '',
+        measuredForce: '',
+        accept: 'YES'
+    })),
+    spreaderTests: Array(10).fill(null).map(() => ({
+        loadType: 'Static',
+        wllPercentage: '100%',
+        testDuration: '',
+        localTime: null,
+        accept: 'YES',
+        testResults: 'PASS',
+        itemDescription: '',
+        pickPointData: Array(6).fill(null).map(() => ({
+            measuredForce: '',
+            accept: 'YES'
+        }))
+    })),
+    steelWeightTests: Array(10).fill(null).map(() => ({
+        loadType: 'Static',
+        equipmentTested: '',
+        swl: '',
+        testLoad: '',
+        localTime: null,
+        testDuration: '',
+        description: '',
+        accept: 'YES',
+        testResults: 'PASS',
+        useLoadCell: false,
+        loadCellSerial: '',
+        loadCellCapacity: '',
+        loadCellReading: ''
+    }))
+});
 
 const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit }) => {
     // data is actually the job object now due to activeJob refactor
@@ -146,6 +239,22 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 measuredForce: '',
                 accept: 'YES'
             }))
+        })),
+        // Steel Weight Test fields
+        steelWeightTests: Array(10).fill(null).map(() => ({
+            loadType: 'Static',
+            equipmentTested: '',
+            swl: '',
+            testLoad: '',
+            localTime: null,
+            testDuration: '',
+            description: '',
+            accept: 'YES',
+            testResults: 'PASS',
+            useLoadCell: false,
+            loadCellSerial: '',
+            loadCellCapacity: '',
+            loadCellReading: ''
         }))
     });
 
@@ -471,6 +580,85 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
 
+    const buildEmptyTest = (layout) => {
+        if (layout === 'spreader-beam') {
+            return {
+                loadType: 'Static',
+                wllPercentage: '100%',
+                testDuration: '',
+                localTime: null,
+                accept: 'YES',
+                testResults: 'PASS',
+                itemDescription: '',
+                pickPointData: Array(6).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
+            };
+        }
+        if (layout === 'steel-weight') {
+            return {
+                loadType: 'Static',
+                equipmentTested: '',
+                swl: '',
+                testLoad: '',
+                localTime: null,
+                testDuration: '',
+                description: '',
+                accept: 'YES',
+                testResults: 'PASS',
+                useLoadCell: false,
+                loadCellSerial: '',
+                loadCellCapacity: '',
+                loadCellReading: ''
+            };
+        }
+        return {
+            loadType: 'Static',
+            wllPercentage: '100%',
+            measuredForce: null,
+            localTime: null,
+            testDuration: '',
+            accept: 'YES',
+            testResults: 'PASS',
+            hookTested: 'Main Hook',
+            itemDescription: '',
+            hookData: Array(10).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
+        };
+    };
+
+    const testFieldFor = (layout) => (
+        layout === 'spreader-beam' ? 'spreaderTests'
+        : layout === 'steel-weight' ? 'steelWeightTests'
+        : 'tests'
+    );
+
+    const addTestRecord = () => {
+        const field = testFieldFor(certLayout);
+        const existing = [...(formData[field] || [])];
+        existing.push(buildEmptyTest(certLayout));
+        const newCount = Math.min(parseInt(formData.numTests) + 1, existing.length);
+        const newFormData = { ...formData, [field]: existing, numTests: newCount };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const removeTestRecord = (index) => {
+        const field = testFieldFor(certLayout);
+        const existing = [...(formData[field] || [])];
+        if (existing.length <= 1) return;
+        existing.splice(index, 1);
+        const newCount = Math.max(1, parseInt(formData.numTests) - 1);
+        const newFormData = { ...formData, [field]: existing, numTests: newCount };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const handleSteelWeightTestInput = (testIndex, field, value) => {
+        const newTests = [...(formData.steelWeightTests || [])];
+        newTests[testIndex] = { ...newTests[testIndex], [field]: value };
+        const newFormData = { ...formData, steelWeightTests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
     const toggleGraphPageBreak = (datasetIdx) => {
         setFormData(prev => {
             const newGraphPageBreaks = {
@@ -569,6 +757,40 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             onUpdateMetadata(jobId, { drafts: newDrafts });
         }
         alert("Draft saved successfully!");
+    };
+
+    const handleResetForm = () => {
+        if (!window.confirm('Reset the certificate editor to defaults?\n\nThis will clear all customer info, instruments, hooks, tests, photos, and signatures. Saved drafts are preserved.')) return;
+        const defaults = buildDefaultFormData();
+        setCertLayout('crane-hook');
+        setCustomerSignature(null);
+        setFormData(defaults);
+        if (onUpdateMetadata && jobId) {
+            onUpdateMetadata(jobId, { certData: defaults });
+        }
+    };
+
+    const handleLoadTemplate = (templateId) => {
+        if (!templateId) return;
+        const template = certificateTemplates.find(t => t.id === templateId);
+        if (!template) return;
+        if (!window.confirm(`Load template "${template.name}"?\n\nThis will replace the current customer info, instruments, procedure, and tests. Photos and drafts are preserved.`)) return;
+
+        if (template.certLayout) setCertLayout(template.certLayout);
+
+        setFormData(prev => {
+            const merged = {
+                ...prev,
+                ...template.formData,
+                photos: prev.photos || [],
+                graphPageBreaks: prev.graphPageBreaks || {},
+                sectionOrder: prev.sectionOrder
+            };
+            if (onUpdateMetadata && jobId) {
+                onUpdateMetadata(jobId, { certData: merged });
+            }
+            return merged;
+        });
     };
 
     const handleLoadDraft = (draft) => {
@@ -716,7 +938,81 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     );
                                     break;
                                 case 'testTable':
-                                    if (certLayout === 'spreader-beam') {
+                                    if (certLayout === 'steel-weight') {
+                                        const anyLoadCell = (formData.steelWeightTests || [])
+                                            .slice(0, parseInt(formData.numTests))
+                                            .some(t => t.useLoadCell);
+                                        content = (
+                                            <table className="cert-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th style={{ width: '35px' }}>Item</th>
+                                                        <th>Equipment / Description</th>
+                                                        <th style={{ width: '60px' }}>Type</th>
+                                                        <th style={{ width: '85px' }}>SWL</th>
+                                                        <th style={{ width: '85px' }}>Test Load</th>
+                                                        {anyLoadCell && <th style={{ width: '90px', fontSize: '0.65rem' }}>Load Cell Reading</th>}
+                                                        <th style={{ width: '65px' }}>Time</th>
+                                                        <th style={{ width: '70px' }}>Duration</th>
+                                                        <th style={{ width: '50px' }}>Accept</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr>
+                                                        <td colSpan={anyLoadCell ? 9 : 8} className="text-left" style={{ paddingBottom: '8px' }}>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <strong style={{ color: '#555' }}>Test Type:</strong> Steel Weight Load Test
+                                                            </div>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <strong>Reference Standards:</strong> {formData.referenceStandards}
+                                                            </div>
+                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
+                                                                <strong>Procedure Summary:</strong><br />
+                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
+                                                                    {formData.procedureSummary}
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                    {(formData.steelWeightTests || [])
+                                                        .slice(0, parseInt(formData.numTests))
+                                                        .map((test, index) => (
+                                                            <tr key={index}>
+                                                                <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
+                                                                <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
+                                                                    <div className="font-bold" style={{ fontSize: '0.9rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                        {test.equipmentTested || 'Equipment under test'}
+                                                                    </div>
+                                                                    {test.description && (
+                                                                        <div style={{ fontSize: '0.7rem', marginTop: '2px', fontStyle: 'italic' }}>
+                                                                            {test.description}
+                                                                        </div>
+                                                                    )}
+                                                                    {test.useLoadCell && (test.loadCellSerial || test.loadCellCapacity) && (
+                                                                        <div style={{ fontSize: '0.65rem', marginTop: '2px', color: '#555' }}>
+                                                                            <strong>Load Cell:</strong>
+                                                                            {test.loadCellSerial ? ` S/N ${test.loadCellSerial}` : ''}
+                                                                            {test.loadCellCapacity ? ` | Cap. ${test.loadCellCapacity}` : ''}
+                                                                        </div>
+                                                                    )}
+                                                                </td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.loadType}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>{test.swl || '--'}</td>
+                                                                <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>{test.testLoad || '--'}</td>
+                                                                {anyLoadCell && (
+                                                                    <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>
+                                                                        {test.useLoadCell && test.loadCellReading ? test.loadCellReading : '--'}
+                                                                    </td>
+                                                                )}
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.localTime}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.testDuration}</td>
+                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                            </tr>
+                                                        ))}
+                                                </tbody>
+                                            </table>
+                                        );
+                                    } else if (certLayout === 'spreader-beam') {
                                         const numPP = parseInt(formData.numPickPoints) || 2;
                                         content = (
                                             <table className="cert-table">
@@ -1060,6 +1356,19 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         >
                             <option value="crane-hook">Standard Crane Hook</option>
                             <option value="spreader-beam">Spreader Beam</option>
+                            <option value="steel-weight">Steel Weight Test</option>
+                        </select>
+                        <select
+                            onChange={(e) => { handleLoadTemplate(e.target.value); e.target.value = ''; }}
+                            className="control-select"
+                            style={{ fontSize: '0.9rem', padding: '6px 12px', minWidth: '240px' }}
+                            title="Load a pre-defined certificate template"
+                            defaultValue=""
+                        >
+                            <option value="">📋 Load Template...</option>
+                            {certificateTemplates.map(t => (
+                                <option key={t.id} value={t.id} title={t.description}>{t.name}</option>
+                            ))}
                         </select>
                         <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
                             Job: <strong style={{ color: 'white' }}>{job?.metadata?.jobNumber || 'N/A'}</strong>
@@ -1095,6 +1404,14 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             ))}
                         </select>
                     </div>
+                    <button
+                        onClick={handleResetForm}
+                        className="action-btn secondary"
+                        title="Reset entire certificate editor to defaults"
+                        style={{ borderColor: '#cc3333', color: '#ff6b6b' }}
+                    >
+                        ♻️ Reset
+                    </button>
                     <button onClick={showPreview} className="action-btn large">
                         👁️ Preview Certificate
                     </button>
@@ -1465,7 +1782,12 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             {/* Crane Hook Test Records */}
             {certLayout === 'crane-hook' && formData.tests.slice(0, parseInt(formData.numTests)).map((test, index) => (
                 <section className="form-section" key={index} style={{ borderLeft: '4px solid var(--accent)' }}>
-                    <h3>Test Record #{index + 1} {index === 0 && <span style={{ fontSize: '0.7rem', color: 'var(--yellow-accent)', marginLeft: '10px' }}>(Auto-Filled)</span>}</h3>
+                    <div className="section-header-row">
+                        <h3 style={{ margin: 0 }}>Test Record #{index + 1} {index === 0 && <span style={{ fontSize: '0.7rem', color: 'var(--yellow-accent)', marginLeft: '10px' }}>(Auto-Filled)</span>}</h3>
+                        {parseInt(formData.numTests) > 1 && (
+                            <button onClick={() => removeTestRecord(index)} className="job-remove-btn" title="Remove this test record">✕</button>
+                        )}
+                    </div>
                     <div className="form-row">
                         <div className="form-group">
                             <label>Load Type</label>
@@ -1559,10 +1881,15 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             {/* Spreader Beam Test Records — with per-pick-point data */}
             {certLayout === 'spreader-beam' && formData.spreaderTests.slice(0, parseInt(formData.numTests)).map((test, index) => (
                 <section className="form-section" key={`sb-${index}`} style={{ borderLeft: '4px solid var(--yellow-accent)' }}>
-                    <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        Test Record #{index + 1}
-                        <span style={{ fontSize: '0.7rem', background: 'var(--yellow-accent)', color: '#000', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>SPREADER BEAM</span>
-                    </h3>
+                    <div className="section-header-row">
+                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: 0 }}>
+                            Test Record #{index + 1}
+                            <span style={{ fontSize: '0.7rem', background: 'var(--yellow-accent)', color: '#000', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>SPREADER BEAM</span>
+                        </h3>
+                        {parseInt(formData.numTests) > 1 && (
+                            <button onClick={() => removeTestRecord(index)} className="job-remove-btn" title="Remove this test record">✕</button>
+                        )}
+                    </div>
                     <div className="form-row">
                         <div className="form-group">
                             <label>Load Type</label>
@@ -1638,7 +1965,145 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 </section>
             ))}
 
-            <div className="form-actions mt-4" style={{ display: 'flex', justifyContent: 'center', padding: '40px 0', borderTop: '1px solid var(--border)' }}>
+            {/* Steel Weight Test Records */}
+            {certLayout === 'steel-weight' && (formData.steelWeightTests || []).slice(0, parseInt(formData.numTests)).map((test, index) => (
+                <section className="form-section" key={`sw-${index}`} style={{ borderLeft: '4px solid #6cb33a' }}>
+                    <div className="section-header-row">
+                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: 0 }}>
+                            Test Record #{index + 1}
+                            <span style={{ fontSize: '0.7rem', background: '#6cb33a', color: '#000', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>STEEL WEIGHT</span>
+                        </h3>
+                        {parseInt(formData.numTests) > 1 && (
+                            <button onClick={() => removeTestRecord(index)} className="job-remove-btn" title="Remove this test record">✕</button>
+                        )}
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group" style={{ flex: 2 }}>
+                            <label>Equipment Tested</label>
+                            <input
+                                value={test.equipmentTested || ''}
+                                onChange={(e) => handleSteelWeightTestInput(index, 'equipmentTested', e.target.value)}
+                                placeholder="e.g. Crane #2, Padeye P-3, Boat A-frame..."
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Load Type</label>
+                            <select value={test.loadType} onChange={(e) => handleSteelWeightTestInput(index, 'loadType', e.target.value)}>
+                                <option value="Static">Static</option>
+                                <option value="Dynamic">Dynamic</option>
+                            </select>
+                        </div>
+                        <div className="form-group">
+                            <label>Accept</label>
+                            <select value={test.accept} onChange={(e) => handleSteelWeightTestInput(index, 'accept', e.target.value)}>
+                                <option value="YES">YES</option>
+                                <option value="NO">NO</option>
+                                <option value="N/A">N/A</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>SWL</label>
+                            <input
+                                value={test.swl || ''}
+                                onChange={(e) => handleSteelWeightTestInput(index, 'swl', e.target.value)}
+                                placeholder="e.g. 10,000 lbs"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Test Load (Steel Weight)</label>
+                            <input
+                                value={test.testLoad || ''}
+                                onChange={(e) => handleSteelWeightTestInput(index, 'testLoad', e.target.value)}
+                                placeholder="e.g. 12,500 lbs"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Local Time (hr:min)</label>
+                            <input
+                                value={test.localTime || ''}
+                                onChange={(e) => handleSteelWeightTestInput(index, 'localTime', e.target.value)}
+                                placeholder="00:00"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Test Duration</label>
+                            <input
+                                list={`sw-duration-${index}`}
+                                value={test.testDuration || ''}
+                                onChange={(e) => handleSteelWeightTestInput(index, 'testDuration', e.target.value)}
+                                placeholder="Select or type..."
+                            />
+                            <datalist id={`sw-duration-${index}`}>
+                                <option value="5 minutes" />
+                                <option value="10 minutes" />
+                                <option value="15 minutes" />
+                            </datalist>
+                        </div>
+                    </div>
+                    <div className="form-group">
+                        <label>Test Description</label>
+                        <textarea
+                            value={test.description || ''}
+                            onChange={(e) => handleSteelWeightTestInput(index, 'description', e.target.value)}
+                            rows="2"
+                            placeholder="Brief description of this test (e.g., 'Static hold of 10-min duration with calibrated steel weights at 125% SWL')"
+                        />
+                    </div>
+
+                    {/* Optional Load Cell info */}
+                    <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem', color: '#6cb33a', fontWeight: 700, marginBottom: test.useLoadCell ? '10px' : 0 }}>
+                            <input
+                                type="checkbox"
+                                checked={!!test.useLoadCell}
+                                onChange={(e) => handleSteelWeightTestInput(index, 'useLoadCell', e.target.checked)}
+                                style={{ width: '16px', height: '16px' }}
+                            />
+                            LOAD CELL USED FOR THIS TEST
+                        </label>
+                        {test.useLoadCell && (
+                            <div className="form-row">
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>Load Cell S/N</label>
+                                    <input
+                                        value={test.loadCellSerial || ''}
+                                        onChange={(e) => handleSteelWeightTestInput(index, 'loadCellSerial', e.target.value)}
+                                        placeholder="Serial number..."
+                                    />
+                                </div>
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>Load Cell Capacity</label>
+                                    <input
+                                        value={test.loadCellCapacity || ''}
+                                        onChange={(e) => handleSteelWeightTestInput(index, 'loadCellCapacity', e.target.value)}
+                                        placeholder="e.g. 25,000 lbs"
+                                    />
+                                </div>
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>Load Cell Reading</label>
+                                    <input
+                                        value={test.loadCellReading || ''}
+                                        onChange={(e) => handleSteelWeightTestInput(index, 'loadCellReading', e.target.value)}
+                                        placeholder="e.g. 12,480 lbs"
+                                    />
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </section>
+            ))}
+
+            <div className="form-actions mt-4" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '20px', padding: '40px 0', borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
+                <button
+                    onClick={addTestRecord}
+                    className="action-btn secondary"
+                    style={{ height: '60px', fontSize: '1.05rem', padding: '0 28px' }}
+                    title="Append a new blank test record"
+                >
+                    + Add Test Record
+                </button>
                 <button onClick={showPreview} className="action-btn large" style={{ width: '500px', height: '60px', fontSize: '1.2rem' }}>
                     👁️ Preview Full Certificate
                 </button>
