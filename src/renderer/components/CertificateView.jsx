@@ -4,6 +4,7 @@ import processChartData from '../utils/processChartData';
 import { getElectronAPI } from '../utils/electronAPI';
 import { SignaturePad } from './CustomerView';
 import StandardFinder from './StandardFinder';
+import CertificateWizard from './CertificateWizard';
 import logo from '../logo.png';
 import { certificateTemplates } from '../data/certificateTemplates';
 
@@ -153,6 +154,26 @@ const buildDefaultFormData = () => ({
         loadCellSerial: '',
         loadCellCapacity: '',
         loadCellReading: ''
+    })),
+    gangwayTests: Array(10).fill(null).map(() => ({
+        loadType: 'Static',
+        equipmentTested: '',
+        swl: '',
+        numWaterbags: 0,
+        waterbagWeightKg: 375,
+        testLoad: '',
+        method: 'Distributed waterbags along treads',
+        localTime: null,
+        testDuration: '',
+        description: '',
+        deflection: '',
+        permanentSet: '',
+        accept: 'YES',
+        testResults: 'PASS',
+        useLoadCell: false,
+        loadCellSerial: '',
+        loadCellCapacity: '',
+        loadCellReading: ''
     }))
 });
 
@@ -255,11 +276,32 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             loadCellSerial: '',
             loadCellCapacity: '',
             loadCellReading: ''
+        })),
+        gangwayTests: Array(10).fill(null).map(() => ({
+            loadType: 'Static',
+            equipmentTested: '',
+            swl: '',
+            numWaterbags: 0,
+            waterbagWeightKg: 375,
+            testLoad: '',
+            method: 'Distributed waterbags along treads',
+            localTime: null,
+            testDuration: '',
+            description: '',
+            deflection: '',
+            permanentSet: '',
+            accept: 'YES',
+            testResults: 'PASS',
+            useLoadCell: false,
+            loadCellSerial: '',
+            loadCellCapacity: '',
+            loadCellReading: ''
         }))
     });
 
     const [isPreview, setIsPreview] = useState(false);
     const [showAiWizard, setShowAiWizard] = useState(false);
+    const [showNewCertWizard, setShowNewCertWizard] = useState(false);
     const [certLayout, setCertLayout] = useState('crane-hook');
     const [showSignaturePad, setShowSignaturePad] = useState(false);
     const [customerSignature, setCustomerSignature] = useState(null);
@@ -610,6 +652,28 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 loadCellReading: ''
             };
         }
+        if (layout === 'gangway-ladder') {
+            return {
+                loadType: 'Static',
+                equipmentTested: '',
+                swl: '',
+                numWaterbags: 0,
+                waterbagWeightKg: 375,
+                testLoad: '',
+                method: 'Distributed waterbags along treads',
+                localTime: null,
+                testDuration: '',
+                description: '',
+                deflection: '',
+                permanentSet: '',
+                accept: 'YES',
+                testResults: 'PASS',
+                useLoadCell: false,
+                loadCellSerial: '',
+                loadCellCapacity: '',
+                loadCellReading: ''
+            };
+        }
         return {
             loadType: 'Static',
             wllPercentage: '100%',
@@ -627,6 +691,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const testFieldFor = (layout) => (
         layout === 'spreader-beam' ? 'spreaderTests'
         : layout === 'steel-weight' ? 'steelWeightTests'
+        : layout === 'gangway-ladder' ? 'gangwayTests'
         : 'tests'
     );
 
@@ -655,6 +720,20 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         const newTests = [...(formData.steelWeightTests || [])];
         newTests[testIndex] = { ...newTests[testIndex], [field]: value };
         const newFormData = { ...formData, steelWeightTests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const handleGangwayTestInput = (testIndex, field, value) => {
+        const newTests = [...(formData.gangwayTests || [])];
+        const updated = { ...newTests[testIndex], [field]: value };
+        if (field === 'numWaterbags' || field === 'waterbagWeightKg') {
+            const n = parseFloat(field === 'numWaterbags' ? value : updated.numWaterbags) || 0;
+            const w = parseFloat(field === 'waterbagWeightKg' ? value : updated.waterbagWeightKg) || 0;
+            if (n > 0 && w > 0) updated.testLoad = `${(n * w).toLocaleString()} kg`;
+        }
+        newTests[testIndex] = updated;
+        const newFormData = { ...formData, gangwayTests: newTests };
         setFormData(newFormData);
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
@@ -768,6 +847,88 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (onUpdateMetadata && jobId) {
             onUpdateMetadata(jobId, { certData: defaults });
         }
+    };
+
+    const handleWizardComplete = (wizard) => {
+        const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+        const loadTypeFor = (t) => t.testType === 'both' ? 'Both' : capitalize(t.testType);
+
+        setCertLayout(wizard.layout);
+        setFormData(prev => {
+            const next = { ...prev };
+            next.numTests = wizard.numTests;
+
+            if (wizard.layout === 'gangway-ladder') {
+                const base = (prev.gangwayTests && prev.gangwayTests.length >= 10) ? prev.gangwayTests : Array(10).fill(null).map(() => ({
+                    loadType: 'Static', equipmentTested: '', swl: '', numWaterbags: 0, waterbagWeightKg: 375, testLoad: '',
+                    method: 'Distributed waterbags along treads', localTime: null, testDuration: '',
+                    description: '', deflection: '', permanentSet: '', accept: 'YES', testResults: 'PASS',
+                    useLoadCell: false, loadCellSerial: '', loadCellCapacity: '', loadCellReading: ''
+                }));
+                next.gangwayTests = base.map((row, idx) => {
+                    if (idx >= wizard.tests.length) return row;
+                    const t = wizard.tests[idx];
+                    const description = t.instrument === 'flow-meter'
+                        ? (row.description ? `${row.description} (flow meter inline)` : 'Flow meter inline')
+                        : row.description;
+                    return {
+                        ...row,
+                        loadType: loadTypeFor(t),
+                        equipmentTested: t.equipment,
+                        useLoadCell: t.instrument === 'load-cell',
+                        description
+                    };
+                });
+            } else if (wizard.layout === 'steel-weight') {
+                const base = (prev.steelWeightTests && prev.steelWeightTests.length >= 10) ? prev.steelWeightTests : Array(10).fill(null).map(() => ({
+                    loadType: 'Static', equipmentTested: '', swl: '', testLoad: '', localTime: null, testDuration: '',
+                    description: '', accept: 'YES', testResults: 'PASS', useLoadCell: false,
+                    loadCellSerial: '', loadCellCapacity: '', loadCellReading: ''
+                }));
+                next.steelWeightTests = base.map((row, idx) => {
+                    if (idx >= wizard.tests.length) return row;
+                    const t = wizard.tests[idx];
+                    const description = t.instrument === 'flow-meter'
+                        ? (row.description ? `${row.description} (flow meter inline)` : 'Flow meter inline')
+                        : row.description;
+                    return {
+                        ...row,
+                        loadType: loadTypeFor(t),
+                        equipmentTested: t.equipment,
+                        useLoadCell: t.instrument === 'load-cell',
+                        description
+                    };
+                });
+            } else if (wizard.layout === 'spreader-beam') {
+                const base = (prev.spreaderTests && prev.spreaderTests.length >= 10) ? prev.spreaderTests : Array(10).fill(null).map(() => ({
+                    loadType: 'Static', wllPercentage: '100%', testDuration: '', localTime: null,
+                    accept: 'YES', testResults: 'PASS', itemDescription: '',
+                    pickPointData: Array(6).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
+                }));
+                next.spreaderTests = base.map((row, idx) => {
+                    if (idx >= wizard.tests.length) return row;
+                    const t = wizard.tests[idx];
+                    const suffix = t.instrument === 'load-cell' ? ' (load cell inline)' : t.instrument === 'flow-meter' ? ' (flow meter inline)' : '';
+                    return { ...row, loadType: loadTypeFor(t), itemDescription: `${t.equipment}${suffix}` };
+                });
+            } else {
+                const base = (prev.tests && prev.tests.length >= 10) ? prev.tests : Array(10).fill(null).map(() => ({
+                    loadType: 'Static', wllPercentage: '100%', measuredForce: null, localTime: null,
+                    testDuration: '', accept: 'YES', testResults: 'PASS', hookTested: 'Main Hook',
+                    itemDescription: '', hookData: Array(10).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
+                }));
+                next.tests = base.map((row, idx) => {
+                    if (idx >= wizard.tests.length) return row;
+                    const t = wizard.tests[idx];
+                    const suffix = t.instrument === 'load-cell' ? ' (load cell inline)' : t.instrument === 'flow-meter' ? ' (flow meter inline)' : '';
+                    return { ...row, loadType: loadTypeFor(t), itemDescription: `${t.equipment}${suffix}` };
+                });
+            }
+
+            if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: next });
+            return next;
+        });
+        setShowNewCertWizard(false);
     };
 
     const handleLoadTemplate = (templateId) => {
@@ -938,7 +1099,92 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     );
                                     break;
                                 case 'testTable':
-                                    if (certLayout === 'steel-weight') {
+                                    if (certLayout === 'gangway-ladder') {
+                                        const rows = (formData.gangwayTests || []).slice(0, parseInt(formData.numTests));
+                                        const anyDeflection = rows.some(t => t.deflection || t.permanentSet);
+                                        content = (
+                                            <table className="cert-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th style={{ width: '35px' }}>Item</th>
+                                                        <th>Equipment / Method</th>
+                                                        <th style={{ width: '60px' }}>Type</th>
+                                                        <th style={{ width: '95px' }}>SWL</th>
+                                                        <th style={{ width: '110px', fontSize: '0.65rem' }}>Test Load (Waterbags)</th>
+                                                        {anyDeflection && <th style={{ width: '70px', fontSize: '0.65rem' }}>Defl. / Set</th>}
+                                                        <th style={{ width: '60px' }}>Time</th>
+                                                        <th style={{ width: '65px' }}>Duration</th>
+                                                        <th style={{ width: '50px' }}>Accept</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr>
+                                                        <td colSpan={anyDeflection ? 9 : 8} className="text-left" style={{ paddingBottom: '8px' }}>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <strong style={{ color: '#555' }}>Test Type:</strong> Gangway / Accommodation Ladder Proof Load
+                                                            </div>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <strong>Reference Standards:</strong> {formData.referenceStandards}
+                                                            </div>
+                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
+                                                                <strong>Procedure Summary:</strong><br />
+                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
+                                                                    {formData.procedureSummary}
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                    {rows.map((test, index) => (
+                                                        <tr key={index}>
+                                                            <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
+                                                            <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
+                                                                <div className="font-bold" style={{ fontSize: '0.9rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                    {test.equipmentTested || 'Equipment under test'}
+                                                                </div>
+                                                                {test.method && (
+                                                                    <div style={{ fontSize: '0.7rem', marginTop: '2px' }}>
+                                                                        <strong>Method:</strong> {test.method}
+                                                                    </div>
+                                                                )}
+                                                                {test.description && (
+                                                                    <div style={{ fontSize: '0.7rem', marginTop: '2px', fontStyle: 'italic' }}>
+                                                                        {test.description}
+                                                                    </div>
+                                                                )}
+                                                                {test.useLoadCell && (test.loadCellSerial || test.loadCellCapacity) && (
+                                                                    <div style={{ fontSize: '0.65rem', marginTop: '2px', color: '#555' }}>
+                                                                        <strong>Load Cell:</strong>
+                                                                        {test.loadCellSerial ? ` S/N ${test.loadCellSerial}` : ''}
+                                                                        {test.loadCellCapacity ? ` | Cap. ${test.loadCellCapacity}` : ''}
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.loadType}</td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>{test.swl || '--'}</td>
+                                                            <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>
+                                                                <div>{test.testLoad || '--'}</div>
+                                                                {(test.numWaterbags > 0) && (
+                                                                    <div style={{ fontSize: '0.6rem', color: '#555' }}>
+                                                                        {test.numWaterbags} × {test.waterbagWeightKg} kg
+                                                                    </div>
+                                                                )}
+                                                            </td>
+                                                            {anyDeflection && (
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.7rem' }}>
+                                                                    {test.deflection && <div>Defl: {test.deflection}</div>}
+                                                                    {test.permanentSet && <div>Set: {test.permanentSet}</div>}
+                                                                    {!test.deflection && !test.permanentSet && '--'}
+                                                                </td>
+                                                            )}
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.localTime}</td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.testDuration}</td>
+                                                            <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        );
+                                    } else if (certLayout === 'steel-weight') {
                                         const anyLoadCell = (formData.steelWeightTests || [])
                                             .slice(0, parseInt(formData.numTests))
                                             .some(t => t.useLoadCell);
@@ -1357,6 +1603,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <option value="crane-hook">Standard Crane Hook</option>
                             <option value="spreader-beam">Spreader Beam</option>
                             <option value="steel-weight">Steel Weight Test</option>
+                            <option value="gangway-ladder">Gangway/Accommodation Ladder</option>
                         </select>
                         <select
                             onChange={(e) => { handleLoadTemplate(e.target.value); e.target.value = ''; }}
@@ -1405,6 +1652,13 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         </select>
                     </div>
                     <button
+                        onClick={() => setShowNewCertWizard(true)}
+                        className="action-btn secondary"
+                        title="Start a new certificate by answering a short questionnaire"
+                    >
+                        🪄 New Certificate Wizard
+                    </button>
+                    <button
                         onClick={handleResetForm}
                         className="action-btn secondary"
                         title="Reset entire certificate editor to defaults"
@@ -1417,6 +1671,13 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     </button>
                 </div>
             </div>
+
+            {showNewCertWizard && (
+                <CertificateWizard
+                    onClose={() => setShowNewCertWizard(false)}
+                    onComplete={handleWizardComplete}
+                />
+            )}
 
             <div className="form-grid">
                 <section className="form-section">
@@ -2087,6 +2348,183 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                         value={test.loadCellReading || ''}
                                         onChange={(e) => handleSteelWeightTestInput(index, 'loadCellReading', e.target.value)}
                                         placeholder="e.g. 12,480 lbs"
+                                    />
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </section>
+            ))}
+
+            {/* Gangway / Accommodation Ladder Test Records */}
+            {certLayout === 'gangway-ladder' && (formData.gangwayTests || []).slice(0, parseInt(formData.numTests)).map((test, index) => (
+                <section className="form-section" key={`gw-${index}`} style={{ borderLeft: '4px solid #2188ff' }}>
+                    <div className="section-header-row">
+                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: 0 }}>
+                            Test Record #{index + 1}
+                            <span style={{ fontSize: '0.7rem', background: '#2188ff', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>GANGWAY / LADDER</span>
+                        </h3>
+                        {parseInt(formData.numTests) > 1 && (
+                            <button onClick={() => removeTestRecord(index)} className="job-remove-btn" title="Remove this test record">✕</button>
+                        )}
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group" style={{ flex: 2 }}>
+                            <label>Equipment Tested</label>
+                            <input
+                                value={test.equipmentTested || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'equipmentTested', e.target.value)}
+                                placeholder="e.g. Port Accommodation Ladder, Lower Platform"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Load Type</label>
+                            <select value={test.loadType} onChange={(e) => handleGangwayTestInput(index, 'loadType', e.target.value)}>
+                                <option value="Static">Static</option>
+                                <option value="Dynamic">Dynamic</option>
+                                <option value="Both">Both</option>
+                            </select>
+                        </div>
+                        <div className="form-group">
+                            <label>Accept</label>
+                            <select value={test.accept} onChange={(e) => handleGangwayTestInput(index, 'accept', e.target.value)}>
+                                <option value="YES">YES</option>
+                                <option value="NO">NO</option>
+                                <option value="N/A">N/A</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>SWL</label>
+                            <input
+                                value={test.swl || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'swl', e.target.value)}
+                                placeholder="e.g. 1,500 kg (20 persons × 75 kg)"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label># Waterbags</label>
+                            <input
+                                type="number"
+                                min="0"
+                                value={test.numWaterbags ?? 0}
+                                onChange={(e) => handleGangwayTestInput(index, 'numWaterbags', e.target.value)}
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Waterbag Weight (kg)</label>
+                            <input
+                                type="number"
+                                min="0"
+                                value={test.waterbagWeightKg ?? 375}
+                                onChange={(e) => handleGangwayTestInput(index, 'waterbagWeightKg', e.target.value)}
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Test Load (auto)</label>
+                            <input
+                                value={test.testLoad || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'testLoad', e.target.value)}
+                                placeholder="auto-calculated"
+                            />
+                        </div>
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group" style={{ flex: 2 }}>
+                            <label>Method</label>
+                            <input
+                                value={test.method || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'method', e.target.value)}
+                                placeholder="e.g. Distributed waterbags along treads"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Local Time (hr:min)</label>
+                            <input
+                                value={test.localTime || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'localTime', e.target.value)}
+                                placeholder="00:00"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Test Duration</label>
+                            <input
+                                list={`gw-duration-${index}`}
+                                value={test.testDuration || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'testDuration', e.target.value)}
+                                placeholder="Select or type..."
+                            />
+                            <datalist id={`gw-duration-${index}`}>
+                                <option value="5 minutes" />
+                                <option value="10 minutes" />
+                                <option value="15 minutes" />
+                            </datalist>
+                        </div>
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>Deflection</label>
+                            <input
+                                value={test.deflection || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'deflection', e.target.value)}
+                                placeholder="e.g. 12 mm at midspan"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Permanent Set</label>
+                            <input
+                                value={test.permanentSet || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'permanentSet', e.target.value)}
+                                placeholder="e.g. 0 mm (none observed)"
+                            />
+                        </div>
+                    </div>
+                    <div className="form-group">
+                        <label>Test Description</label>
+                        <textarea
+                            value={test.description || ''}
+                            onChange={(e) => handleGangwayTestInput(index, 'description', e.target.value)}
+                            rows="2"
+                            placeholder="e.g. 'Static proof load 2.2× SWL via calibrated waterbags distributed along treads, held 5 min, deflection measured at midspan.'"
+                        />
+                    </div>
+
+                    {/* Optional Load Cell info */}
+                    <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem', color: '#2188ff', fontWeight: 700, marginBottom: test.useLoadCell ? '10px' : 0 }}>
+                            <input
+                                type="checkbox"
+                                checked={!!test.useLoadCell}
+                                onChange={(e) => handleGangwayTestInput(index, 'useLoadCell', e.target.checked)}
+                                style={{ width: '16px', height: '16px' }}
+                            />
+                            LOAD CELL USED FOR THIS TEST
+                        </label>
+                        {test.useLoadCell && (
+                            <div className="form-row">
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>Load Cell S/N</label>
+                                    <input
+                                        value={test.loadCellSerial || ''}
+                                        onChange={(e) => handleGangwayTestInput(index, 'loadCellSerial', e.target.value)}
+                                        placeholder="Serial number..."
+                                    />
+                                </div>
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>Load Cell Capacity</label>
+                                    <input
+                                        value={test.loadCellCapacity || ''}
+                                        onChange={(e) => handleGangwayTestInput(index, 'loadCellCapacity', e.target.value)}
+                                        placeholder="e.g. 5,000 kg"
+                                    />
+                                </div>
+                                <div className="form-group" style={{ flex: 1 }}>
+                                    <label>Load Cell Reading</label>
+                                    <input
+                                        value={test.loadCellReading || ''}
+                                        onChange={(e) => handleGangwayTestInput(index, 'loadCellReading', e.target.value)}
+                                        placeholder="e.g. 3,375 kg"
                                     />
                                 </div>
                             </div>
