@@ -174,6 +174,20 @@ const buildDefaultFormData = () => ({
         loadCellSerial: '',
         loadCellCapacity: '',
         loadCellReading: ''
+    })),
+    boomCraneTests: Array(10).fill(null).map(() => ({
+        loadType: 'Static',
+        wllPercentage: '100%',
+        boomAngle: '',
+        wllAtAngle: '',
+        measuredForce: null,
+        localTime: null,
+        testDuration: '',
+        accept: 'YES',
+        testResults: 'PASS',
+        hookTested: 'Main Hook',
+        itemDescription: '',
+        hookData: Array(10).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
     }))
 });
 
@@ -296,6 +310,20 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             loadCellSerial: '',
             loadCellCapacity: '',
             loadCellReading: ''
+        })),
+        boomCraneTests: Array(10).fill(null).map(() => ({
+            loadType: 'Static',
+            wllPercentage: '100%',
+            boomAngle: '',
+            wllAtAngle: '',
+            measuredForce: null,
+            localTime: null,
+            testDuration: '',
+            accept: 'YES',
+            testResults: 'PASS',
+            hookTested: 'Main Hook',
+            itemDescription: '',
+            hookData: Array(10).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
         }))
     });
 
@@ -674,6 +702,22 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 loadCellReading: ''
             };
         }
+        if (layout === 'boom-crane') {
+            return {
+                loadType: 'Static',
+                wllPercentage: '100%',
+                boomAngle: '',
+                wllAtAngle: '',
+                measuredForce: null,
+                localTime: null,
+                testDuration: '',
+                accept: 'YES',
+                testResults: 'PASS',
+                hookTested: 'Main Hook',
+                itemDescription: '',
+                hookData: Array(10).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
+            };
+        }
         return {
             loadType: 'Static',
             wllPercentage: '100%',
@@ -692,6 +736,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         layout === 'spreader-beam' ? 'spreaderTests'
         : layout === 'steel-weight' ? 'steelWeightTests'
         : layout === 'gangway-ladder' ? 'gangwayTests'
+        : layout === 'boom-crane' ? 'boomCraneTests'
         : 'tests'
     );
 
@@ -720,6 +765,24 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         const newTests = [...(formData.steelWeightTests || [])];
         newTests[testIndex] = { ...newTests[testIndex], [field]: value };
         const newFormData = { ...formData, steelWeightTests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const handleBoomCraneTestInput = (testIndex, field, value) => {
+        const newTests = [...(formData.boomCraneTests || [])];
+        newTests[testIndex] = { ...newTests[testIndex], [field]: value };
+        const newFormData = { ...formData, boomCraneTests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const handleBoomCraneTestHookData = (testIndex, hookIndex, field, value) => {
+        const newTests = [...(formData.boomCraneTests || [])];
+        const newHookData = [...(newTests[testIndex].hookData || [])];
+        newHookData[hookIndex] = { ...newHookData[hookIndex], [field]: value };
+        newTests[testIndex] = { ...newTests[testIndex], hookData: newHookData };
+        const newFormData = { ...formData, boomCraneTests: newTests };
         setFormData(newFormData);
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
@@ -851,14 +914,36 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
     const handleWizardComplete = (wizard) => {
         const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-        const loadTypeFor = (t) => t.testType === 'both' ? 'Both' : capitalize(t.testType);
+        const loadTypeFor = (t) => capitalize(t.testType);
 
         setCertLayout(wizard.layout);
         setFormData(prev => {
             const next = { ...prev };
             next.numTests = wizard.numTests;
 
-            if (wizard.layout === 'gangway-ladder') {
+            if (wizard.layout === 'boom-crane' || wizard.layout === 'crane-hook') {
+                const targetField = wizard.layout === 'boom-crane' ? 'boomCraneTests' : 'tests';
+                const buildBlank = () => wizard.layout === 'boom-crane' ? ({
+                    loadType: 'Static', wllPercentage: '100%', boomAngle: '', wllAtAngle: '', measuredForce: null,
+                    localTime: null, testDuration: '', accept: 'YES', testResults: 'PASS', hookTested: 'Main Hook',
+                    itemDescription: '', hookData: Array(10).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
+                }) : ({
+                    loadType: 'Static', wllPercentage: '100%', measuredForce: null, localTime: null,
+                    testDuration: '', accept: 'YES', testResults: 'PASS', hookTested: 'Main Hook',
+                    itemDescription: '', hookData: Array(10).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
+                });
+                const base = (prev[targetField] && prev[targetField].length >= 10) ? prev[targetField] : Array(10).fill(null).map(buildBlank);
+                next[targetField] = base.map((row, idx) => {
+                    if (idx >= wizard.tests.length) return row;
+                    const t = wizard.tests[idx];
+                    const suffix = t.instrument === 'load-cell' ? ' (load cell inline)' : t.instrument === 'flow-meter' ? ' (flow meter inline)' : '';
+                    return {
+                        ...row,
+                        loadType: loadTypeFor(t),
+                        itemDescription: `${t.equipment}${suffix}`
+                    };
+                });
+            } else if (wizard.layout === 'gangway-ladder') {
                 const base = (prev.gangwayTests && prev.gangwayTests.length >= 10) ? prev.gangwayTests : Array(10).fill(null).map(() => ({
                     loadType: 'Static', equipmentTested: '', swl: '', numWaterbags: 0, waterbagWeightKg: 375, testLoad: '',
                     method: 'Distributed waterbags along treads', localTime: null, testDuration: '',
@@ -1099,7 +1184,61 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     );
                                     break;
                                 case 'testTable':
-                                    if (certLayout === 'gangway-ladder') {
+                                    if (certLayout === 'boom-crane') {
+                                        const rows = (formData.boomCraneTests || []).slice(0, parseInt(formData.numTests));
+                                        content = (
+                                            <table className="cert-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th style={{ width: '35px' }}>Item</th>
+                                                        <th>Description</th>
+                                                        <th style={{ width: '60px' }}>Type</th>
+                                                        <th style={{ width: '70px' }}>Boom Angle</th>
+                                                        <th style={{ width: '90px' }}>WLL @ Angle</th>
+                                                        <th style={{ width: '55px' }}>% WLL</th>
+                                                        <th style={{ width: '60px' }}>Time</th>
+                                                        <th style={{ width: '65px' }}>Duration</th>
+                                                        <th style={{ width: '50px' }}>Accept</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr>
+                                                        <td colSpan={9} className="text-left" style={{ paddingBottom: '8px' }}>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <strong style={{ color: '#555' }}>Test Type:</strong> Boom Crane Load Test
+                                                            </div>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <strong>Reference Standards:</strong> {formData.referenceStandards}
+                                                            </div>
+                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
+                                                                <strong>Procedure Summary:</strong><br />
+                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
+                                                                    {formData.procedureSummary}
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                    {rows.map((test, index) => (
+                                                        <tr key={index}>
+                                                            <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
+                                                            <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
+                                                                <div className="font-bold" style={{ fontSize: '0.9rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                    {test.itemDescription || formData.equipmentTested || 'Boom crane'}
+                                                                </div>
+                                                            </td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.loadType}</td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>{test.boomAngle || '--'}</td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>{test.wllAtAngle || '--'}</td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>{test.wllPercentage || '--'}</td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.localTime}</td>
+                                                            <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.testDuration}</td>
+                                                            <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        );
+                                    } else if (certLayout === 'gangway-ladder') {
                                         const rows = (formData.gangwayTests || []).slice(0, parseInt(formData.numTests));
                                         const anyDeflection = rows.some(t => t.deflection || t.permanentSet);
                                         content = (
@@ -1604,6 +1743,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <option value="spreader-beam">Spreader Beam</option>
                             <option value="steel-weight">Steel Weight Test</option>
                             <option value="gangway-ladder">Gangway/Accommodation Ladder</option>
+                            <option value="boom-crane">Boom Crane</option>
                         </select>
                         <select
                             onChange={(e) => { handleLoadTemplate(e.target.value); e.target.value = ''; }}
@@ -1864,7 +2004,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             </select>
                         </div>
                     </div>
-                    {certLayout === 'crane-hook' && (
+                    {(certLayout === 'crane-hook' || certLayout === 'boom-crane') && (
                     <div className="form-row">
                         <div className="form-group">
                             <label>Crane Manufacturer</label>
@@ -2103,39 +2243,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         </div>
                     </div>
 
-                    {/* Per-hook measured forces — only shown when multiple hooks are being tested */}
-                    {(formData.hooks || []).length > 1 && (
-                    <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
-                        <div style={{ fontSize: '0.78rem', color: 'var(--accent)', fontWeight: 700, marginBottom: '10px' }}>MEASURED FORCE PER HOOK</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min((formData.hooks || []).length, 3)}, 1fr)`, gap: '10px' }}>
-                            {(formData.hooks || []).map((hook, hIdx) => (
-                                <div key={hIdx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                                    <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
-                                        {hook.name || `Hook ${hIdx + 1}`}
-                                        {hook.wll && <span style={{ opacity: 0.6 }}> (WLL: {hook.wll})</span>}
-                                    </label>
-                                    <div style={{ display: 'flex', gap: '6px' }}>
-                                        <input
-                                            value={(test.hookData && test.hookData[hIdx]?.measuredForce) || ''}
-                                            onChange={(e) => handleTestHookData(index, hIdx, 'measuredForce', e.target.value)}
-                                            className={index === 0 && hIdx === 0 ? "auto-input" : ""}
-                                            placeholder="lbs"
-                                            style={{ flex: 1, fontSize: '0.85rem' }}
-                                        />
-                                        <select
-                                            value={(test.hookData && test.hookData[hIdx]?.accept) || 'YES'}
-                                            onChange={(e) => handleTestHookData(index, hIdx, 'accept', e.target.value)}
-                                            style={{ width: '65px', fontSize: '0.78rem' }}
-                                        >
-                                            <option value="YES">YES</option>
-                                            <option value="NO">NO</option>
-                                        </select>
-                                    </div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                    )}
                 </section>
             ))}
 
@@ -2382,7 +2489,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <select value={test.loadType} onChange={(e) => handleGangwayTestInput(index, 'loadType', e.target.value)}>
                                 <option value="Static">Static</option>
                                 <option value="Dynamic">Dynamic</option>
-                                <option value="Both">Both</option>
                             </select>
                         </div>
                         <div className="form-group">
@@ -2530,6 +2636,91 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             </div>
                         )}
                     </div>
+                </section>
+            ))}
+
+            {/* Boom Crane Test Records — mirrors crane-hook with boom angle + WLL@angle */}
+            {certLayout === 'boom-crane' && (formData.boomCraneTests || []).slice(0, parseInt(formData.numTests)).map((test, index) => (
+                <section className="form-section" key={`bc-${index}`} style={{ borderLeft: '4px solid #f85149' }}>
+                    <div className="section-header-row">
+                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: 0 }}>
+                            Test Record #{index + 1}
+                            <span style={{ fontSize: '0.7rem', background: '#f85149', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>BOOM CRANE</span>
+                        </h3>
+                        {parseInt(formData.numTests) > 1 && (
+                            <button onClick={() => removeTestRecord(index)} className="job-remove-btn" title="Remove this test record">✕</button>
+                        )}
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>Load Type</label>
+                            <select value={test.loadType} onChange={(e) => handleBoomCraneTestInput(index, 'loadType', e.target.value)}>
+                                <option value="Static">Static</option>
+                                <option value="Dynamic">Dynamic</option>
+                            </select>
+                        </div>
+                        <div className="form-group">
+                            <label>% of WLL</label>
+                            <input
+                                value={test.wllPercentage || ''}
+                                onChange={(e) => handleBoomCraneTestInput(index, 'wllPercentage', e.target.value)}
+                                placeholder="e.g. 125%"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Accept</label>
+                            <select value={test.accept} onChange={(e) => handleBoomCraneTestInput(index, 'accept', e.target.value)}>
+                                <option value="YES">YES</option>
+                                <option value="NO">NO</option>
+                                <option value="N/A">N/A</option>
+                            </select>
+                        </div>
+                        <div className="form-group" style={{ flex: 2 }}>
+                            <label>Item Description</label>
+                            <input
+                                value={test.itemDescription || ''}
+                                onChange={(e) => handleBoomCraneTestInput(index, 'itemDescription', e.target.value)}
+                                placeholder="e.g. Main Hoist @ 45° boom, Aux Whip Line..."
+                            />
+                        </div>
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>Boom Angle</label>
+                            <input
+                                value={test.boomAngle || ''}
+                                onChange={(e) => handleBoomCraneTestInput(index, 'boomAngle', e.target.value)}
+                                placeholder="e.g. 45° or 60 deg"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Crane WLL @ Angle</label>
+                            <input
+                                value={test.wllAtAngle || ''}
+                                onChange={(e) => handleBoomCraneTestInput(index, 'wllAtAngle', e.target.value)}
+                                placeholder="e.g. 5,000 kg"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Local Time (hr:min)</label>
+                            <input value={test.localTime || ''} onChange={(e) => handleBoomCraneTestInput(index, 'localTime', e.target.value)} placeholder="00:00" />
+                        </div>
+                        <div className="form-group">
+                            <label>Duration (min)</label>
+                            <input
+                                list={`bc-duration-${index}`}
+                                value={test.testDuration || ''}
+                                onChange={(e) => handleBoomCraneTestInput(index, 'testDuration', e.target.value)}
+                                placeholder="Select or type..."
+                            />
+                            <datalist id={`bc-duration-${index}`}>
+                                <option value="5 minutes" />
+                                <option value="10 minutes" />
+                                <option value="15 minutes" />
+                            </datalist>
+                        </div>
+                    </div>
+
                 </section>
             ))}
 

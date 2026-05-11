@@ -1695,7 +1695,9 @@ body {
 }
 
 .wizard-step textarea,
-.wizard-step select {
+.wizard-step select,
+.wizard-step input[type="text"],
+.wizard-step input[type="number"] {
   width: 100%;
   background: var(--bg-dark);
   border: 1px solid var(--border);
@@ -1706,7 +1708,9 @@ body {
   min-height: 100px;
 }
 
-.wizard-step select {
+.wizard-step select,
+.wizard-step input[type="text"],
+.wizard-step input[type="number"] {
   min-height: auto;
 }
 

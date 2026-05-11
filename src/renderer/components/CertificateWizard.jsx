@@ -4,7 +4,8 @@ const LAYOUT_OPTIONS = [
     { value: 'crane-hook', label: 'Standard Crane Hook' },
     { value: 'spreader-beam', label: 'Spreader Beam' },
     { value: 'steel-weight', label: 'Steel Weight Test' },
-    { value: 'gangway-ladder', label: 'Gangway / Accommodation Ladder' }
+    { value: 'gangway-ladder', label: 'Gangway / Accommodation Ladder' },
+    { value: 'boom-crane', label: 'Boom Crane' }
 ];
 
 const INSTRUMENT_OPTIONS = [
@@ -134,7 +135,7 @@ function CertificateWizard({ onComplete, onClose }) {
                                                 <div>
                                                     <label style={{ fontSize: '0.85rem' }}>Test type</label>
                                                     <div style={{ display: 'flex', gap: '12px', marginTop: '4px' }}>
-                                                        {['static', 'dynamic', 'both'].map(v => (
+                                                        {['static', 'dynamic'].map(v => (
                                                             <label key={v} style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.9rem' }}>
                                                                 <input type="radio" name={`tt-${idx}`} value={v} checked={t.testType === v} onChange={() => updateTest(idx, { testType: v })} />
                                                                 {v.charAt(0).toUpperCase() + v.slice(1)}
