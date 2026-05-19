@@ -69,6 +69,8 @@ const buildDefaultFormData = () => ({
     facilityLocation: '',
     customerPO: '',
     buyer: '',
+    vesselName: '',
+    vesselClass: '',
     projectRef: '',
     testDate: new Date().toISOString().split('T')[0],
     projectMgr: '',
@@ -134,6 +136,7 @@ const buildDefaultFormData = () => ({
         accept: 'YES',
         testResults: 'PASS',
         itemDescription: '',
+        numPickPoints: null,
         pickPointData: Array(6).fill(null).map(() => ({
             measuredForce: '',
             accept: 'YES'
@@ -153,6 +156,24 @@ const buildDefaultFormData = () => ({
         loadCellSerial: '',
         loadCellCapacity: '',
         loadCellReading: ''
+    })),
+    gangwayTests: Array(10).fill(null).map(() => ({
+        loadType: 'Static',
+        equipmentTested: '',
+        swl: '',
+        testLoad: '',
+        flowMeterBefore: '',
+        flowMeterAtLoad: '',
+        flowMeterUnits: 'gal',
+        deflectionBefore: '',
+        deflectionAfter: '',
+        deflectionRecovered: '',
+        deflectionUnits: 'in',
+        localTime: null,
+        testDuration: '',
+        description: '',
+        accept: 'YES',
+        testResults: 'PASS'
     }))
 });
 
@@ -169,6 +190,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         facilityLocation: '',
         customerPO: '',
         buyer: '',
+        vesselName: '',
+        vesselClass: '',
         projectRef: '',
         testDate: new Date().toISOString().split('T')[0],
         projectMgr: '',
@@ -235,6 +258,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             accept: 'YES',
             testResults: 'PASS',
             itemDescription: '',
+            numPickPoints: null,
             pickPointData: Array(6).fill(null).map(() => ({
                 measuredForce: '',
                 accept: 'YES'
@@ -255,12 +279,50 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             loadCellSerial: '',
             loadCellCapacity: '',
             loadCellReading: ''
+        })),
+        // Accommodation Ladder / Gangway (Flow Meter) fields
+        gangwayTests: Array(10).fill(null).map(() => ({
+            loadType: 'Static',
+            equipmentTested: '',
+            swl: '',
+            testLoad: '',
+            flowMeterBefore: '',
+            flowMeterAtLoad: '',
+            flowMeterUnits: 'gal',
+            deflectionBefore: '',
+            deflectionAfter: '',
+            deflectionUnits: 'in',
+            localTime: null,
+            testDuration: '',
+            description: '',
+            accept: 'YES',
+            testResults: 'PASS'
         }))
     });
 
     const [isPreview, setIsPreview] = useState(false);
     const [showAiWizard, setShowAiWizard] = useState(false);
-    const [certLayout, setCertLayout] = useState('crane-hook');
+    const [certLayout, setCertLayoutState] = useState(job?.metadata?.certLayout || 'crane-hook');
+    const setCertLayout = (next) => {
+        setCertLayoutState(next);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certLayout: next });
+        if (next === 'gangway') {
+            setFormData(prev => {
+                const newFormData = {
+                    ...prev,
+                    instruments: [{
+                        instrument: '3" Zenner Flow Meter',
+                        capacity: prev.instruments?.[0]?.capacity || '3"',
+                        serialNo: prev.instruments?.[0]?.serialNo || '',
+                        dataLink: prev.instruments?.[0]?.dataLink || 'Analog',
+                        accuracy: prev.instruments?.[0]?.accuracy || ''
+                    }]
+                };
+                if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+                return newFormData;
+            });
+        }
+    };
     const [showSignaturePad, setShowSignaturePad] = useState(false);
     const [customerSignature, setCustomerSignature] = useState(null);
     const [certRegistry, setCertRegistry] = useState([]);
@@ -590,6 +652,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 accept: 'YES',
                 testResults: 'PASS',
                 itemDescription: '',
+                numPickPoints: null,
                 pickPointData: Array(6).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
             };
         }
@@ -610,6 +673,26 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 loadCellReading: ''
             };
         }
+        if (layout === 'gangway') {
+            return {
+                loadType: 'Static',
+                equipmentTested: '',
+                swl: '',
+                testLoad: '',
+                flowMeterBefore: '',
+                flowMeterAtLoad: '',
+                flowMeterUnits: 'gal',
+                deflectionBefore: '',
+                deflectionAfter: '',
+                deflectionRecovered: '',
+                deflectionUnits: 'in',
+                localTime: null,
+                testDuration: '',
+                description: '',
+                accept: 'YES',
+                testResults: 'PASS'
+            };
+        }
         return {
             loadType: 'Static',
             wllPercentage: '100%',
@@ -627,6 +710,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const testFieldFor = (layout) => (
         layout === 'spreader-beam' ? 'spreaderTests'
         : layout === 'steel-weight' ? 'steelWeightTests'
+        : layout === 'gangway' ? 'gangwayTests'
         : 'tests'
     );
 
@@ -655,6 +739,14 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         const newTests = [...(formData.steelWeightTests || [])];
         newTests[testIndex] = { ...newTests[testIndex], [field]: value };
         const newFormData = { ...formData, steelWeightTests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const handleGangwayTestInput = (testIndex, field, value) => {
+        const newTests = [...(formData.gangwayTests || [])];
+        newTests[testIndex] = { ...newTests[testIndex], [field]: value };
+        const newFormData = { ...formData, gangwayTests: newTests };
         setFormData(newFormData);
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
@@ -934,57 +1026,64 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                     </div>
                                                 ))}
                                             </div>
+                                            {(formData.referenceStandards?.trim() || formData.procedureSummary?.trim()) && (
+                                                <div style={{ borderTop: '1.5px solid #000', marginTop: '10px', paddingTop: '8px' }}>
+                                                    {formData.referenceStandards?.trim() && (
+                                                        <div style={{ fontSize: '0.75rem', marginBottom: '4px' }}>
+                                                            <strong>Reference Standards:</strong> {formData.referenceStandards}
+                                                        </div>
+                                                    )}
+                                                    {formData.procedureSummary?.trim() && (
+                                                        <div style={{ fontSize: '0.75rem' }}>
+                                                            <strong>Procedure Summary:</strong>
+                                                            <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
+                                                                {formData.procedureSummary}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
                                         </div>
                                     );
                                     break;
                                 case 'testTable':
                                     if (certLayout === 'steel-weight') {
-                                        const anyLoadCell = (formData.steelWeightTests || [])
-                                            .slice(0, parseInt(formData.numTests))
-                                            .some(t => t.useLoadCell);
+                                        const swRows = (formData.steelWeightTests || []).slice(0, parseInt(formData.numTests));
+                                        const anyLoadCell = swRows.some(t => t.useLoadCell);
+                                        const anyTime = swRows.some(t => t.localTime && String(t.localTime).trim());
+                                        const colSpan = 7 + (anyLoadCell ? 1 : 0) + (anyTime ? 1 : 0);
                                         content = (
                                             <table className="cert-table">
                                                 <thead>
                                                     <tr>
-                                                        <th style={{ width: '35px' }}>Item</th>
+                                                        <th style={{ width: '32px' }}>Item</th>
                                                         <th>Equipment / Description</th>
-                                                        <th style={{ width: '60px' }}>Type</th>
-                                                        <th style={{ width: '85px' }}>SWL</th>
-                                                        <th style={{ width: '85px' }}>Test Load</th>
-                                                        {anyLoadCell && <th style={{ width: '90px', fontSize: '0.65rem' }}>Load Cell Reading</th>}
-                                                        <th style={{ width: '65px' }}>Time</th>
-                                                        <th style={{ width: '70px' }}>Duration</th>
-                                                        <th style={{ width: '50px' }}>Accept</th>
+                                                        <th style={{ width: '52px' }}>Type</th>
+                                                        <th style={{ width: '78px' }}>SWL</th>
+                                                        <th style={{ width: '78px' }}>Test Load</th>
+                                                        {anyLoadCell && <th style={{ width: '82px', fontSize: '0.65rem' }}>Load Cell Reading</th>}
+                                                        {anyTime && <th style={{ width: '55px' }}>Time</th>}
+                                                        <th style={{ width: '60px' }}>Duration</th>
+                                                        <th style={{ width: '42px' }}>Accept</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
                                                     <tr>
-                                                        <td colSpan={anyLoadCell ? 9 : 8} className="text-left" style={{ paddingBottom: '8px' }}>
+                                                        <td colSpan={colSpan} className="text-left" style={{ paddingBottom: '8px' }}>
                                                             <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
                                                                 <strong style={{ color: '#555' }}>Test Type:</strong> Steel Weight Load Test
                                                             </div>
-                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
-                                                                <strong>Reference Standards:</strong> {formData.referenceStandards}
-                                                            </div>
-                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
-                                                                <strong>Procedure Summary:</strong><br />
-                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
-                                                                    {formData.procedureSummary}
-                                                                </div>
-                                                            </div>
                                                         </td>
                                                     </tr>
-                                                    {(formData.steelWeightTests || [])
-                                                        .slice(0, parseInt(formData.numTests))
-                                                        .map((test, index) => (
+                                                    {swRows.map((test, index) => (
                                                             <tr key={index}>
                                                                 <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
                                                                 <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
-                                                                    <div className="font-bold" style={{ fontSize: '0.9rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                    <div className="font-bold" style={{ fontSize: '0.82rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px', lineHeight: '1.15' }}>
                                                                         {test.equipmentTested || 'Equipment under test'}
                                                                     </div>
                                                                     {test.description && (
-                                                                        <div style={{ fontSize: '0.7rem', marginTop: '2px', fontStyle: 'italic' }}>
+                                                                        <div style={{ fontSize: '0.7rem', marginTop: '2px', fontStyle: 'italic', lineHeight: '1.25' }}>
                                                                             {test.description}
                                                                         </div>
                                                                     )}
@@ -996,24 +1095,129 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                         </div>
                                                                     )}
                                                                 </td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.loadType}</td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>{test.swl || '--'}</td>
-                                                                <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>{test.testLoad || '--'}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>{test.loadType}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.swl || '--'}</td>
+                                                                <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.82rem' }}>{test.testLoad || '--'}</td>
                                                                 {anyLoadCell && (
-                                                                    <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.85rem' }}>
+                                                                    <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.82rem' }}>
                                                                         {test.useLoadCell && test.loadCellReading ? test.loadCellReading : '--'}
                                                                     </td>
                                                                 )}
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.localTime}</td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.testDuration}</td>
+                                                                {anyTime && (
+                                                                    <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>{test.localTime}</td>
+                                                                )}
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>{test.testDuration}</td>
                                                                 <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
                                                             </tr>
                                                         ))}
                                                 </tbody>
                                             </table>
                                         );
+                                    } else if (certLayout === 'gangway') {
+                                        const gwRows = (formData.gangwayTests || []).slice(0, parseInt(formData.numTests));
+                                        const anyTime = gwRows.some(t => t.localTime && String(t.localTime).trim());
+                                        const anyDeflection = gwRows.some(t =>
+                                            (t.deflectionBefore !== '' && t.deflectionBefore != null) ||
+                                            (t.deflectionAfter !== '' && t.deflectionAfter != null)
+                                        );
+                                        const anyPermSet = gwRows.some(t =>
+                                            t.deflectionRecovered !== '' && t.deflectionRecovered != null
+                                        );
+                                        const colSpan = 9 + (anyTime ? 1 : 0) + (anyDeflection ? 1 : 0) + (anyPermSet ? 1 : 0);
+                                        content = (
+                                            <table className="cert-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th style={{ width: '32px' }}>Item</th>
+                                                        <th>Equipment / Description</th>
+                                                        <th style={{ width: '52px' }}>Type</th>
+                                                        <th style={{ width: '78px' }}>SWL</th>
+                                                        <th style={{ width: '78px' }}>Test Load</th>
+                                                        <th style={{ width: '70px', fontSize: '0.65rem' }}>FM Before</th>
+                                                        <th style={{ width: '70px', fontSize: '0.65rem' }}>FM @ Load</th>
+                                                        <th style={{ width: '60px', fontSize: '0.65rem' }}>Δ Flow</th>
+                                                        {anyDeflection && <th style={{ width: '70px', fontSize: '0.65rem' }}>Deflection</th>}
+                                                        {anyPermSet && <th style={{ width: '70px', fontSize: '0.65rem' }}>Perm. Set</th>}
+                                                        {anyTime && <th style={{ width: '55px' }}>Time</th>}
+                                                        <th style={{ width: '60px' }}>Duration</th>
+                                                        <th style={{ width: '42px' }}>Accept</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr>
+                                                        <td colSpan={colSpan} className="text-left" style={{ paddingBottom: '8px' }}>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <strong style={{ color: '#555' }}>Test Type:</strong> Accommodation Ladder / Gangway Load Test (Flow Meter Method)
+                                                            </div>
+                                                            {(formData.vesselName || formData.vesselClass) && (
+                                                                <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                    {formData.vesselName && <div><strong style={{ color: '#555' }}>Vessel Name:</strong> {formData.vesselName}</div>}
+                                                                    {formData.vesselClass && <div><strong style={{ color: '#555' }}>Vessel Class:</strong> {formData.vesselClass}</div>}
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                    {gwRows.map((test, index) => {
+                                                        const before = parseFloat(test.flowMeterBefore);
+                                                        const atLoad = parseFloat(test.flowMeterAtLoad);
+                                                        const delta = (!isNaN(before) && !isNaN(atLoad)) ? (atLoad - before) : null;
+                                                        const units = test.flowMeterUnits || '';
+                                                        const dBefore = parseFloat(test.deflectionBefore);
+                                                        const dAfter = parseFloat(test.deflectionAfter);
+                                                        const dRecovered = parseFloat(test.deflectionRecovered);
+                                                        const deflectionDelta = (!isNaN(dBefore) && !isNaN(dAfter)) ? (dAfter - dBefore) : null;
+                                                        const permSet = (!isNaN(dBefore) && !isNaN(dRecovered)) ? (dRecovered - dBefore) : null;
+                                                        const deflUnits = test.deflectionUnits || '';
+                                                        return (
+                                                            <tr key={index}>
+                                                                <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
+                                                                <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
+                                                                    <div className="font-bold" style={{ fontSize: '0.82rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px', lineHeight: '1.15' }}>
+                                                                        {test.equipmentTested || 'Equipment under test'}
+                                                                    </div>
+                                                                    {test.description && (
+                                                                        <div style={{ fontSize: '0.7rem', marginTop: '2px', fontStyle: 'italic', lineHeight: '1.25' }}>
+                                                                            {test.description}
+                                                                        </div>
+                                                                    )}
+                                                                </td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>{test.loadType}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.swl || '--'}</td>
+                                                                <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.82rem' }}>{test.testLoad || '--'}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>
+                                                                    {test.flowMeterBefore !== '' && test.flowMeterBefore != null ? `${test.flowMeterBefore} ${units}` : '--'}
+                                                                </td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>
+                                                                    {test.flowMeterAtLoad !== '' && test.flowMeterAtLoad != null ? `${test.flowMeterAtLoad} ${units}` : '--'}
+                                                                </td>
+                                                                <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>
+                                                                    {delta !== null ? `${delta.toFixed(2)} ${units}` : '--'}
+                                                                </td>
+                                                                {anyDeflection && (
+                                                                    <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>
+                                                                        {deflectionDelta !== null ? `${deflectionDelta.toFixed(3)} ${deflUnits}` : '--'}
+                                                                    </td>
+                                                                )}
+                                                                {anyPermSet && (
+                                                                    <td className="force-val" style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem', color: permSet !== null && Math.abs(permSet) > 0.001 ? '#cc0000' : 'inherit' }}>
+                                                                        {permSet !== null ? `${permSet.toFixed(3)} ${deflUnits}` : '--'}
+                                                                    </td>
+                                                                )}
+                                                                {anyTime && (
+                                                                    <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>{test.localTime}</td>
+                                                                )}
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.78rem' }}>{test.testDuration}</td>
+                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        );
                                     } else if (certLayout === 'spreader-beam') {
-                                        const numPP = parseInt(formData.numPickPoints) || 2;
+                                        const globalPP = parseInt(formData.numPickPoints) || 2;
+                                        const activeTests = formData.spreaderTests.slice(0, parseInt(formData.numTests));
+                                        const numPP = Math.max(globalPP, ...activeTests.map(t => t.numPickPoints ?? globalPP));
                                         content = (
                                             <table className="cert-table">
                                                 <thead>
@@ -1025,13 +1229,14 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                         {formData.pickPoints.slice(0, numPP).map((pp, i) => (
                                                             <th key={i} style={{ width: '85px', fontSize: '0.65rem' }}>{pp.label || `PP ${i+1}`}</th>
                                                         ))}
+                                                        <th style={{ width: '95px', fontSize: '0.65rem' }}>Total</th>
                                                         <th style={{ width: '50px' }}>Accept</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
                                                     <tr>
                                                         <td></td>
-                                                        <td className="text-left" colSpan={3 + numPP} style={{ paddingBottom: '8px' }}>
+                                                        <td className="text-left" colSpan={4 + numPP} style={{ paddingBottom: '8px' }}>
                                                             <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
                                                                 <div><strong style={{ color: '#555' }}>Beam Manufacturer:</strong> {formData.beamManufacturer || formData.equipmentManufacturer || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Beam S/N:</strong> {formData.beamSerial || formData.equipmentSerial || 'N/A'}</div>
@@ -1045,13 +1250,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                     <span key={i}>{pp.label}{pp.position ? ` (${pp.position})` : ''}{i < numPP - 1 ? ' | ' : ''}</span>
                                                                 ))}
                                                             </div>
-                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
-                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
-                                                                <strong>Procedure Summary:</strong><br />
-                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
-                                                                    {formData.procedureSummary}
-                                                                </div>
-                                                            </div>
                                                         </td>
                                                     </tr>
                                                     {formData.spreaderTests
@@ -1064,16 +1262,31 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                         {test.itemDescription || formData.equipmentTested || 'Spreader Beam Load Test'}
                                                                     </div>
                                                                     <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
-                                                                        <strong>Type:</strong> {test.loadType} | <strong>TEST LOAD:</strong> {test.wllPercentage || '100%'} WLL
+                                                                        <strong>Type:</strong> {test.loadType} | <strong>TEST LOAD:</strong> {test.wllPercentage || '100%'} WLL | <strong>Pick Pts:</strong> {test.numPickPoints ?? globalPP}
                                                                     </div>
                                                                 </td>
                                                                 <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.localTime}</td>
                                                                 <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.testDuration}</td>
-                                                                {test.pickPointData.slice(0, numPP).map((ppd, ppIdx) => (
-                                                                    <td key={ppIdx} className="force-val" style={{ fontSize: '0.85rem', verticalAlign: 'middle', paddingTop: '8px' }}>
-                                                                        {ppd.measuredForce ? `${ppd.measuredForce} lbs` : '--'}
-                                                                    </td>
-                                                                ))}
+                                                                {Array.from({ length: numPP }, (_, ppIdx) => {
+                                                                    const testPPCount = test.numPickPoints ?? globalPP;
+                                                                    const ppd = test.pickPointData[ppIdx];
+                                                                    const inUse = ppIdx < testPPCount;
+                                                                    return (
+                                                                        <td key={ppIdx} className="force-val" style={{ fontSize: '0.85rem', verticalAlign: 'middle', paddingTop: '8px', color: inUse ? undefined : '#999' }}>
+                                                                            {inUse ? (ppd?.measuredForce ? `${ppd.measuredForce} lbs` : '--') : '—'}
+                                                                        </td>
+                                                                    );
+                                                                })}
+                                                                <td className="force-val" style={{ fontSize: '0.85rem', fontWeight: 700, verticalAlign: 'middle', paddingTop: '8px' }}>
+                                                                    {(() => {
+                                                                        const testPPCount = test.numPickPoints ?? globalPP;
+                                                                        const total = test.pickPointData.slice(0, testPPCount).reduce((sum, ppd) => {
+                                                                            const val = parseFloat(String(ppd?.measuredForce || '').replace(/,/g, ''));
+                                                                            return sum + (isNaN(val) ? 0 : val);
+                                                                        }, 0);
+                                                                        return total > 0 ? `${total.toLocaleString()} lbs` : '--';
+                                                                    })()}
+                                                                </td>
                                                                 <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
                                                             </tr>
                                                         ))}
@@ -1104,13 +1317,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                 <div><strong style={{ color: '#555' }}>Crane S/N:</strong> {formData.equipmentSerial || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Crane WLL:</strong> {formData.equipmentWll || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Target Test Load:</strong> {formData.targetLoad || 'N/A'}</div>
-                                                            </div>
-                                                            <div style={{ marginBottom: '4px', marginTop: '4px', fontSize: '0.75rem' }}><strong>Reference Standards:</strong> {formData.referenceStandards}</div>
-                                                            <div style={{ marginTop: '4px', fontSize: '0.75rem' }}>
-                                                                <strong>Procedure Summary:</strong><br />
-                                                                <div style={{ fontSize: '0.62rem', fontStyle: 'italic', lineHeight: '1.2', marginTop: '2px' }}>
-                                                                    {formData.procedureSummary}
-                                                                </div>
                                                             </div>
                                                         </td>
                                                     </tr>
@@ -1357,6 +1563,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <option value="crane-hook">Standard Crane Hook</option>
                             <option value="spreader-beam">Spreader Beam</option>
                             <option value="steel-weight">Steel Weight Test</option>
+                            <option value="gangway">Accommodation Ladder / Gangway (Flow Meter)</option>
                         </select>
                         <select
                             onChange={(e) => { handleLoadTemplate(e.target.value); e.target.value = ''; }}
@@ -1439,31 +1646,53 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <input name="buyer" value={formData.buyer} onChange={handleInput} />
                         </div>
                     </div>
+                    {certLayout === 'gangway' && (
+                        <div className="form-row">
+                            <div className="form-group">
+                                <label>Vessel Name</label>
+                                <input name="vesselName" value={formData.vesselName || ''} onChange={handleInput} placeholder="e.g. M/V Atlantic Voyager" />
+                            </div>
+                            <div className="form-group">
+                                <label>Vessel Class</label>
+                                <input name="vesselClass" value={formData.vesselClass || ''} onChange={handleInput} placeholder="e.g. ABS A1, DNV +1A1, USCG..." />
+                            </div>
+                        </div>
+                    )}
                 </section>
 
                 <section className="form-section span-2">
                     <div className="section-header-row">
-                        <h3>Instruments</h3>
-                        <button onClick={addInstrument} className="action-btn small">
-                            + Add Instrument
-                        </button>
+                        <h3>Instruments{certLayout === 'gangway' && <span style={{ marginLeft: '10px', fontSize: '0.7rem', color: '#2188ff', fontWeight: 600 }}>(locked to 3" Zenner Flow Meter for Accommodation Ladder / Gangway)</span>}</h3>
+                        {certLayout !== 'gangway' && (
+                            <button onClick={addInstrument} className="action-btn small">
+                                + Add Instrument
+                            </button>
+                        )}
                     </div>
                     {formData.instruments?.map((inst, index) => (
                         <div key={index} className="instrument-entry-block" style={{ borderBottom: index < formData.instruments.length - 1 ? '1px solid var(--border)' : 'none', paddingBottom: '20px', marginBottom: '20px' }}>
                             <div className="section-header-row" style={{ marginTop: '10px' }}>
                                 <h4 style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Instrument #{index + 1}</h4>
-                                {formData.instruments.length > 1 && (
+                                {formData.instruments.length > 1 && certLayout !== 'gangway' && (
                                     <button onClick={() => removeInstrument(index)} className="job-remove-btn" title="Remove Instrument">✕</button>
                                 )}
                             </div>
                             <div className="form-row">
                                 <div className="form-group" style={{ flex: 1 }}>
                                     <label>Instrument</label>
-                                    <select value={inst.instrument} onChange={(e) => handleInstrumentInput(index, 'instrument', e.target.value)}>
-                                        <option value="">Select Instrument...</option>
-                                        <option value="Load Cell">Load Cell</option>
-                                        <option value="Flow Meter">Flow Meter</option>
-                                    </select>
+                                    {certLayout === 'gangway' ? (
+                                        <input
+                                            value={'3" Zenner Flow Meter'}
+                                            readOnly
+                                            style={{ background: 'var(--bg-card)', color: '#2188ff', fontWeight: 700, cursor: 'not-allowed' }}
+                                        />
+                                    ) : (
+                                        <select value={inst.instrument} onChange={(e) => handleInstrumentInput(index, 'instrument', e.target.value)}>
+                                            <option value="">Select Instrument...</option>
+                                            <option value="Load Cell">Load Cell</option>
+                                            <option value="Flow Meter">Flow Meter</option>
+                                        </select>
+                                    )}
                                 </div>
                                 <div className="form-group" style={{ flex: 1 }}>
                                     <label>Capacity</label>
@@ -1489,6 +1718,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     <select value={inst.accuracy} onChange={(e) => handleInstrumentInput(index, 'accuracy', e.target.value)}>
                                         <option value="">Select Accuracy...</option>
                                         <option value="+/- 0.2% FS">+/- 0.2% FS</option>
+                                        <option value="99.2%">99.2%</option>
                                         <option value="N/A">N/A</option>
                                     </select>
                                 </div>
@@ -1903,6 +2133,15 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <input value={test.wllPercentage} onChange={(e) => handleSpreaderTestInput(index, 'wllPercentage', e.target.value)} placeholder="e.g. 100%" />
                         </div>
                         <div className="form-group">
+                            <label>Pick Points</label>
+                            <select value={test.numPickPoints ?? ''} onChange={(e) => handleSpreaderTestInput(index, 'numPickPoints', e.target.value === '' ? null : parseInt(e.target.value))}>
+                                <option value="">Beam Default ({formData.numPickPoints})</option>
+                                {[1, 2, 3, 4, 5, 6].map(n => (
+                                    <option key={n} value={n}>{n} Pick Point{n > 1 ? 's' : ''}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="form-group">
                             <label>Local Time (hr:min)</label>
                             <input value={test.localTime || ''} onChange={(e) => handleSpreaderTestInput(index, 'localTime', e.target.value)} placeholder="00:00" />
                         </div>
@@ -1936,10 +2175,11 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     </div>
 
                     {/* Per-pick-point measured forces */}
+                    {(() => { const testPP = test.numPickPoints ?? parseInt(formData.numPickPoints); return (
                     <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
-                        <div style={{ fontSize: '0.78rem', color: 'var(--yellow-accent)', fontWeight: 700, marginBottom: '10px' }}>MEASURED FORCE AT EACH PICK POINT</div>
-                        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(parseInt(formData.numPickPoints), 3)}, 1fr)`, gap: '10px' }}>
-                            {test.pickPointData.slice(0, parseInt(formData.numPickPoints)).map((ppd, ppIdx) => (
+                        <div style={{ fontSize: '0.78rem', color: 'var(--yellow-accent)', fontWeight: 700, marginBottom: '10px' }}>MEASURED FORCE AT EACH PICK POINT ({testPP})</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(testPP, 3)}, 1fr)`, gap: '10px' }}>
+                            {test.pickPointData.slice(0, testPP).map((ppd, ppIdx) => (
                                 <div key={ppIdx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                     <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
                                         {formData.pickPoints[ppIdx]?.label || `Pick Point ${ppIdx + 1}`}
@@ -1962,6 +2202,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             ))}
                         </div>
                     </div>
+                    ); })()}
                 </section>
             ))}
 
@@ -2094,6 +2335,226 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     </div>
                 </section>
             ))}
+
+            {/* Gangway / Accommodation Ladder Test Records (Flow Meter) */}
+            {certLayout === 'gangway' && (formData.gangwayTests || []).slice(0, parseInt(formData.numTests)).map((test, index) => {
+                const before = parseFloat(test.flowMeterBefore);
+                const atLoad = parseFloat(test.flowMeterAtLoad);
+                const delta = (!isNaN(before) && !isNaN(atLoad)) ? (atLoad - before) : null;
+                const dBefore = parseFloat(test.deflectionBefore);
+                const dAfter = parseFloat(test.deflectionAfter);
+                const dRecovered = parseFloat(test.deflectionRecovered);
+                const deflectionDelta = (!isNaN(dBefore) && !isNaN(dAfter)) ? (dAfter - dBefore) : null;
+                const permanentSet = (!isNaN(dBefore) && !isNaN(dRecovered)) ? (dRecovered - dBefore) : null;
+                return (
+                <section className="form-section" key={`gw-${index}`} style={{ borderLeft: '4px solid #2188ff' }}>
+                    <div className="section-header-row">
+                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: 0 }}>
+                            Test Record #{index + 1}
+                            <span style={{ fontSize: '0.7rem', background: '#2188ff', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>GANGWAY (FLOW METER)</span>
+                        </h3>
+                        {parseInt(formData.numTests) > 1 && (
+                            <button onClick={() => removeTestRecord(index)} className="job-remove-btn" title="Remove this test record">✕</button>
+                        )}
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group" style={{ flex: 2 }}>
+                            <label>Equipment Tested</label>
+                            <input
+                                value={test.equipmentTested || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'equipmentTested', e.target.value)}
+                                placeholder="e.g. Accommodation Ladder Port, Gangway #2..."
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Load Type</label>
+                            <select value={test.loadType} onChange={(e) => handleGangwayTestInput(index, 'loadType', e.target.value)}>
+                                <option value="Static">Static</option>
+                                <option value="Dynamic">Dynamic</option>
+                            </select>
+                        </div>
+                        <div className="form-group">
+                            <label>Accept</label>
+                            <select value={test.accept} onChange={(e) => handleGangwayTestInput(index, 'accept', e.target.value)}>
+                                <option value="YES">YES</option>
+                                <option value="NO">NO</option>
+                                <option value="N/A">N/A</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div className="form-row">
+                        <div className="form-group">
+                            <label>SWL</label>
+                            <input
+                                value={test.swl || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'swl', e.target.value)}
+                                placeholder="e.g. 500 lbs"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Test Load</label>
+                            <input
+                                value={test.testLoad || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'testLoad', e.target.value)}
+                                placeholder="e.g. 625 lbs (125% SWL)"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Local Time (hr:min)</label>
+                            <input
+                                value={test.localTime || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'localTime', e.target.value)}
+                                placeholder="00:00"
+                            />
+                        </div>
+                        <div className="form-group">
+                            <label>Test Duration</label>
+                            <input
+                                list={`gw-duration-${index}`}
+                                value={test.testDuration || ''}
+                                onChange={(e) => handleGangwayTestInput(index, 'testDuration', e.target.value)}
+                                placeholder="Select or type..."
+                            />
+                            <datalist id={`gw-duration-${index}`}>
+                                <option value="5 minutes" />
+                                <option value="10 minutes" />
+                                <option value="15 minutes" />
+                            </datalist>
+                        </div>
+                    </div>
+
+                    {/* Flow Meter readings */}
+                    <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid #2188ff' }}>
+                        <div style={{ fontSize: '0.85rem', color: '#2188ff', fontWeight: 700, marginBottom: '10px' }}>FLOW METER READINGS</div>
+                        <div className="form-row">
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Before Test Reading</label>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    value={test.flowMeterBefore || ''}
+                                    onChange={(e) => handleGangwayTestInput(index, 'flowMeterBefore', e.target.value)}
+                                    placeholder="Baseline reading"
+                                />
+                            </div>
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Test Load Reading</label>
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    value={test.flowMeterAtLoad || ''}
+                                    onChange={(e) => handleGangwayTestInput(index, 'flowMeterAtLoad', e.target.value)}
+                                    placeholder="Reading at test load"
+                                />
+                            </div>
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Units</label>
+                                <input
+                                    list={`gw-units-${index}`}
+                                    value={test.flowMeterUnits || 'gal'}
+                                    onChange={(e) => handleGangwayTestInput(index, 'flowMeterUnits', e.target.value)}
+                                    placeholder="gal"
+                                />
+                                <datalist id={`gw-units-${index}`}>
+                                    <option value="gal" />
+                                    <option value="L" />
+                                    <option value="m³" />
+                                    <option value="ft³" />
+                                </datalist>
+                            </div>
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Delta (Test − Before)</label>
+                                <input
+                                    value={delta !== null ? `${delta.toFixed(2)} ${test.flowMeterUnits || ''}` : '--'}
+                                    readOnly
+                                    style={{ background: 'var(--bg-card)', color: 'var(--yellow-accent)', fontWeight: 700 }}
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Deflection readings */}
+                    <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid #2188ff' }}>
+                        <div style={{ fontSize: '0.85rem', color: '#2188ff', fontWeight: 700, marginBottom: '10px' }}>DEFLECTION MEASUREMENTS</div>
+                        <div className="form-row">
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Before Load</label>
+                                <input
+                                    type="number"
+                                    step="0.001"
+                                    value={test.deflectionBefore || ''}
+                                    onChange={(e) => handleGangwayTestInput(index, 'deflectionBefore', e.target.value)}
+                                    placeholder="Baseline"
+                                />
+                            </div>
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Under Load</label>
+                                <input
+                                    type="number"
+                                    step="0.001"
+                                    value={test.deflectionAfter || ''}
+                                    onChange={(e) => handleGangwayTestInput(index, 'deflectionAfter', e.target.value)}
+                                    placeholder="At test load"
+                                />
+                            </div>
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Recovered</label>
+                                <input
+                                    type="number"
+                                    step="0.001"
+                                    value={test.deflectionRecovered || ''}
+                                    onChange={(e) => handleGangwayTestInput(index, 'deflectionRecovered', e.target.value)}
+                                    placeholder="After load removed"
+                                />
+                            </div>
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Units</label>
+                                <input
+                                    list={`gw-defl-units-${index}`}
+                                    value={test.deflectionUnits || 'in'}
+                                    onChange={(e) => handleGangwayTestInput(index, 'deflectionUnits', e.target.value)}
+                                    placeholder="in"
+                                />
+                                <datalist id={`gw-defl-units-${index}`}>
+                                    <option value="in" />
+                                    <option value="mm" />
+                                    <option value="cm" />
+                                    <option value="ft" />
+                                </datalist>
+                            </div>
+                        </div>
+                        <div className="form-row">
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Deflection (Under Load − Before)</label>
+                                <input
+                                    value={deflectionDelta !== null ? `${deflectionDelta.toFixed(3)} ${test.deflectionUnits || ''}` : '--'}
+                                    readOnly
+                                    style={{ background: 'var(--bg-card)', color: 'var(--yellow-accent)', fontWeight: 700 }}
+                                />
+                            </div>
+                            <div className="form-group" style={{ flex: 1 }}>
+                                <label>Permanent Set (Recovered − Before)</label>
+                                <input
+                                    value={permanentSet !== null ? `${permanentSet.toFixed(3)} ${test.deflectionUnits || ''}` : '--'}
+                                    readOnly
+                                    style={{ background: 'var(--bg-card)', color: permanentSet !== null && Math.abs(permanentSet) > 0.001 ? '#ff7b7b' : 'var(--yellow-accent)', fontWeight: 700 }}
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="form-group" style={{ marginTop: '12px' }}>
+                        <label>Test Description</label>
+                        <textarea
+                            value={test.description || ''}
+                            onChange={(e) => handleGangwayTestInput(index, 'description', e.target.value)}
+                            rows="2"
+                            placeholder="Brief description of this test (e.g., 'Static hold of 10-min duration with water bag at 125% SWL, flow meter measuring water displacement')"
+                        />
+                    </div>
+                </section>
+                );
+            })}
 
             <div className="form-actions mt-4" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '20px', padding: '40px 0', borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
                 <button

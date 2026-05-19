@@ -1715,6 +1715,137 @@ async function getAccessToken(scopes = ['Files.Read.All', 'Sites.Read.All']) {
     }
 }
 
+// --- Leak email outbox (persisted, retries when offline) ---
+const LEAK_OUTBOX_FILE = path.join(app.getPath('userData'), 'leak-email-outbox.json');
+let leakOutbox = [];
+let leakOutboxTimer = null;
+const LEAK_OUTBOX_RETRY_MS = 30_000;
+
+function loadLeakOutbox() {
+    try {
+        if (!fs.existsSync(LEAK_OUTBOX_FILE)) return [];
+        const parsed = JSON.parse(fs.readFileSync(LEAK_OUTBOX_FILE, 'utf8'));
+        return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+}
+function saveLeakOutbox() {
+    try { fs.writeFileSync(LEAK_OUTBOX_FILE, JSON.stringify(leakOutbox, null, 2), 'utf8'); }
+    catch (e) { console.error('[LEAK EMAIL] outbox save failed:', e.message); }
+}
+leakOutbox = loadLeakOutbox();
+
+function buildLeakEmailPayload(leak) {
+    const sevLabel = (leak.severity || 'minor').toUpperCase();
+    const when = new Date(leak.timestamp || Date.now());
+    const dateStr = when.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    const timeStr = when.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
+    let gpsLine = '';
+    if (leak.gps && leak.gps.lat && leak.gps.lng) {
+        const mapsUrl = `https://www.google.com/maps?q=${leak.gps.lat},${leak.gps.lng}`;
+        gpsLine = `<tr><td style="padding:6px 12px;font-weight:600;color:#555;">GPS</td><td style="padding:6px 12px;"><a href="${mapsUrl}">${leak.gps.lat.toFixed(6)}, ${leak.gps.lng.toFixed(6)}</a></td></tr>`;
+    }
+
+    const sevColor = leak.severity === 'severe' ? '#cc0000' : leak.severity === 'moderate' ? '#e68a00' : '#2d8a4e';
+
+    const html = `
+<div style="font-family:Segoe UI,Arial,sans-serif;max-width:640px;">
+  <div style="background:#1a3a6c;color:#fff;padding:16px 20px;border-radius:6px 6px 0 0;">
+    <h2 style="margin:0;font-size:18px;">Leak Report — <span style="color:${sevColor};background:#fff;padding:2px 10px;border-radius:4px;font-size:14px;">${sevLabel}</span></h2>
+  </div>
+  <div style="border:1px solid #ddd;border-top:none;padding:20px;border-radius:0 0 6px 6px;">
+    <table style="border-collapse:collapse;width:100%;margin-bottom:16px;">
+      <tr><td style="padding:6px 12px;font-weight:600;color:#555;">Date</td><td style="padding:6px 12px;">${dateStr} at ${timeStr}</td></tr>
+      <tr><td style="padding:6px 12px;font-weight:600;color:#555;">Severity</td><td style="padding:6px 12px;font-weight:700;color:${sevColor};">${sevLabel}</td></tr>
+      ${leak.serial ? `<tr><td style="padding:6px 12px;font-weight:600;color:#555;">Waterbag S/N</td><td style="padding:6px 12px;">${leak.serial}</td></tr>` : ''}
+      ${gpsLine}
+      <tr><td style="padding:6px 12px;font-weight:600;color:#555;vertical-align:top;">Description</td><td style="padding:6px 12px;">${leak.description}</td></tr>
+    </table>
+    ${leak.dataUrl ? '<p style="font-weight:600;color:#555;margin-bottom:8px;">Photo:</p><img src="cid:leak-photo" style="max-width:100%;border-radius:4px;border:1px solid #ddd;" />' : ''}
+  </div>
+  <p style="font-size:11px;color:#999;margin-top:12px;">Sent automatically by OSCAR Dashboard</p>
+</div>`;
+
+    const attachments = [];
+    if (leak.dataUrl) {
+        const match = leak.dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+        if (match) {
+            attachments.push({
+                '@odata.type': '#microsoft.graph.fileAttachment',
+                name: `leak-photo-${leak.id}.${match[1]}`,
+                contentType: `image/${match[1]}`,
+                contentBytes: match[2],
+                contentId: 'leak-photo',
+                isInline: true
+            });
+        }
+    }
+
+    return {
+        subject: `Leak Detected [${sevLabel}] — ${leak.serial || 'No S/N'} — ${dateStr}`,
+        body: { contentType: 'HTML', content: html },
+        toRecipients: [{ emailAddress: { address: 'warehouseoperations@hydrowates.com' } }],
+        attachments
+    };
+}
+
+async function trySendLeakEmail(entry) {
+    const token = await getAccessToken(['Mail.Send']);
+    const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: entry.message, saveToSentItems: false })
+    });
+    if (!resp.ok) {
+        const body = await resp.text();
+        throw new Error(`Graph ${resp.status}: ${body.slice(0, 200)}`);
+    }
+}
+
+async function drainLeakOutbox() {
+    if (leakOutbox.length === 0) return;
+    const pending = [...leakOutbox];
+    for (const entry of pending) {
+        try {
+            await trySendLeakEmail(entry);
+            leakOutbox = leakOutbox.filter(e => e.id !== entry.id);
+            saveLeakOutbox();
+            console.log(`[LEAK EMAIL] Sent queued email for ${entry.id}`);
+        } catch (err) {
+            console.log(`[LEAK EMAIL] Outbox retry failed for ${entry.id}: ${err.message}`);
+            break;
+        }
+    }
+    scheduleOutboxRetry();
+}
+
+function scheduleOutboxRetry() {
+    if (leakOutboxTimer) clearTimeout(leakOutboxTimer);
+    leakOutboxTimer = null;
+    if (leakOutbox.length > 0) {
+        leakOutboxTimer = setTimeout(drainLeakOutbox, LEAK_OUTBOX_RETRY_MS);
+        console.log(`[LEAK EMAIL] ${leakOutbox.length} queued, retrying in ${LEAK_OUTBOX_RETRY_MS / 1000}s`);
+    }
+}
+
+async function sendLeakEmail(leak) {
+    const entry = { id: leak.id, message: buildLeakEmailPayload(leak), queuedAt: Date.now() };
+    try {
+        await trySendLeakEmail(entry);
+        console.log(`[LEAK EMAIL] Sent to warehouseoperations@hydrowates.com for leak ${leak.id}`);
+    } catch (err) {
+        console.log(`[LEAK EMAIL] Send failed (queued for retry): ${err.message}`);
+        leakOutbox.push(entry);
+        saveLeakOutbox();
+        scheduleOutboxRetry();
+    }
+}
+
+if (leakOutbox.length > 0) {
+    console.log(`[LEAK EMAIL] ${leakOutbox.length} unsent emails found on startup, will retry shortly`);
+    setTimeout(drainLeakOutbox, 5000);
+}
+
 async function determineStandard(event, answers) {
     const settings = loadSettings();
     const openaiKey = process.env.OPENAI_API_KEY || settings.openaiKey;
@@ -2570,11 +2701,12 @@ app.whenReady().then(() => {
         }
     };
 
-    // When a phone logs a leak, notify the renderer
+    // When a phone logs a leak, notify the renderer and email warehouse ops
     companionServer.onLeakReceived = (leak) => {
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('companion-leak-received', leak);
         }
+        sendLeakEmail(leak);
     };
 
     // When a phone requests a certificate, fetch it via Graph using the laptop's MSAL token
