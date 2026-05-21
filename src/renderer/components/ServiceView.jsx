@@ -341,19 +341,25 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         else if (/hour|hr/i.test(timeHeader)) detectedTimeUnit = 'hrs';
 
         if (existingJobIndex !== -1) {
-            // Replace existing job's data with new import
+            // Append new data set to existing job
             const existingJob = allJobs[existingJobIndex];
+            const existingDataSets = existingJob.dataSets || (existingJob.data ? [{
+                data: existingJob.data,
+                name: 'Data Set 1',
+                inputTimeUnit: detectedTimeUnit,
+                timestamp: existingJob.id
+            }] : []);
 
             const newDataSet = {
                 data: data,
-                name: extraMetadata.fileName || 'Data Set 1',
+                name: extraMetadata.fileName || `Data Set ${existingDataSets.length + 1}`,
                 inputTimeUnit: detectedTimeUnit,
                 timestamp: Date.now()
             };
 
             const updatedJob = {
                 ...existingJob,
-                dataSets: [newDataSet],
+                dataSets: [...existingDataSets, newDataSet],
                 metadata: { ...existingJob.metadata, ...extraMetadata }
             };
             // Clean up legacy single data field

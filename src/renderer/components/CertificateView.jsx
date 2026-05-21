@@ -30,7 +30,7 @@ function CertChart({ stats, yAxisLabel, xAxisLabel, isPrint }) {
     const rechartsData = toRechartsData(stats.chartData);
     const fontSize = isPrint ? 7 : 9;
     return (
-        <ResponsiveContainer width="100%" height={280} minWidth={0}>
+        <ResponsiveContainer width="100%" height="100%" minWidth={0}>
             <LineChart data={rechartsData}>
                 <CartesianGrid strokeDasharray="3 3" stroke={isPrint ? '#eee' : 'rgba(33,51,77,0.5)'} />
                 <XAxis
@@ -137,6 +137,7 @@ const buildDefaultFormData = () => ({
         testResults: 'PASS',
         itemDescription: '',
         numPickPoints: null,
+        pickPointStart: 0,
         pickPointData: Array(6).fill(null).map(() => ({
             measuredForce: '',
             accept: 'YES'
@@ -259,6 +260,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             testResults: 'PASS',
             itemDescription: '',
             numPickPoints: null,
+            pickPointStart: 0,
             pickPointData: Array(6).fill(null).map(() => ({
                 measuredForce: '',
                 accept: 'YES'
@@ -326,6 +328,14 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const [showSignaturePad, setShowSignaturePad] = useState(false);
     const [customerSignature, setCustomerSignature] = useState(null);
     const [certRegistry, setCertRegistry] = useState([]);
+    const [showAiGenerator, setShowAiGenerator] = useState(false);
+    const [aiDescription, setAiDescription] = useState('');
+    const [aiLoading, setAiLoading] = useState(false);
+    const [aiError, setAiError] = useState('');
+    const [aiMessages, setAiMessages] = useState([]);
+    const aiChatEndRef = useRef(null);
+    const [aiLayoutOverrides, setAiLayoutOverrides] = useState(null);
+    const [aiLayoutLoading, setAiLayoutLoading] = useState(false);
 
     // --- Drag-and-Drop Section Reordering ---
     const dragItem = useRef(null);
@@ -386,6 +396,16 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
     useEffect(() => {
         const load = async () => {
+            // If no SharePoint job is selected, try to find one from cache by job number
+            let spJob = selectedJob;
+            if (!spJob && job?.metadata?.jobNumber) {
+                try {
+                    const cached = await getElectronAPI().getJobsCache();
+                    const jobs = cached?.jobs || (Array.isArray(cached) ? cached : []);
+                    spJob = jobs.find(j => j.QuoteNum === job.metadata.jobNumber) || null;
+                } catch (_) { /* offline or no cache */ }
+            }
+
             setFormData(prev => {
                 let current = { ...prev };
 
@@ -463,55 +483,93 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     });
                 }
 
-                // Metadata always takes priority when data changes
+                // Auto-fill from SharePoint job (live selection or cache lookup)
+                if (spJob) {
+                    if (!current.projectRef) current.projectRef = spJob.QuoteNum || '';
+                    if (!current.soldTo) current.soldTo = spJob.LeadCompany || spJob.Customer || '';
+                    if (!current.customerPO) current.customerPO = spJob.PONumber || '';
+                    if (!current.buyer) current.buyer = spJob.Customer || spJob.LeadName || '';
+                    if (!current.facilityLocation) current.facilityLocation = spJob.ShipToAddress || spJob.Location || spJob.JobLocation || spJob.ShippingAddress || '';
+                }
                 if (job?.metadata) {
-                    current = {
-                        ...current,
-                        projectRef: job.metadata.jobNumber || current.projectRef,
-                        soldTo: job.metadata.leadCompany || job.metadata.customer || current.soldTo,
-                        customerPO: job.metadata.poNumber || current.customerPO,
-                        buyer: job.metadata.customer || current.buyer
-                    };
-                } else if (selectedJob) {
-                    // Fallback to currently selected SharePoint job if no recorded data exists
-                    current = {
-                        ...current,
-                        projectRef: selectedJob.QuoteNum || '',
-                        soldTo: selectedJob.LeadCompany || selectedJob.Customer || '',
-                        customerPO: selectedJob.PONumber || '',
-                        buyer: selectedJob.Customer || selectedJob.LeadName || '',
-                        facilityLocation: selectedJob.Location || selectedJob.JobLocation || selectedJob.ShippingAddress || ''
-                    };
+                    if (!current.projectRef) current.projectRef = job.metadata.jobNumber || '';
+                    if (!current.soldTo) current.soldTo = job.metadata.leadCompany || job.metadata.customer || '';
+                    if (!current.customerPO) current.customerPO = job.metadata.poNumber || '';
+                    if (!current.buyer) current.buyer = job.metadata.customer || '';
                 }
 
-                // Update peak stats from chart if data is present
-                if (firstData && firstData.length > 0) {
+                // Auto-fill test records from each dataset's peak stats
+                if (dataSets.length > 0) {
                     const serials = current.instruments?.map(inst => inst.serialNo).filter(Boolean).flatMap(s => s.split(/[, \s]+/)) || [];
-                    const stats = processChartData(firstData, serials);
-                    if (stats) {
-                        const updatedTests = [...current.tests];
+                    const updatedTests = [...current.tests];
 
-                        // Auto-fill first record ONLY if it has never been set (null = untouched)
-                        if (updatedTests[0].measuredForce === null) {
-                            updatedTests[0].measuredForce = stats.maxWeight.toFixed(0);
+                    dataSets.forEach((ds, idx) => {
+                        if (!ds.data || ds.data.length === 0 || idx >= updatedTests.length) return;
+                        const stats = processChartData(ds.data, serials);
+                        if (!stats) return;
+
+                        if (updatedTests[idx].measuredForce === null) {
+                            updatedTests[idx].measuredForce = stats.maxWeight.toFixed(0);
                         }
-                        // Also auto-fill hookData[0] for the first test
-                        if (updatedTests[0].hookData && !updatedTests[0].hookData[0]?.measuredForce) {
-                            const newHookData = [...updatedTests[0].hookData];
+                        if (updatedTests[idx].hookData && !updatedTests[idx].hookData[0]?.measuredForce) {
+                            const newHookData = [...updatedTests[idx].hookData];
                             newHookData[0] = { ...newHookData[0], measuredForce: stats.maxWeight.toFixed(0) };
-                            updatedTests[0] = { ...updatedTests[0], hookData: newHookData };
+                            updatedTests[idx] = { ...updatedTests[idx], hookData: newHookData };
                         }
-                        if (updatedTests[0].localTime === null) {
-                            updatedTests[0].localTime = stats.peakTime;
+                        if (updatedTests[idx].localTime === null) {
+                            updatedTests[idx].localTime = stats.peakTime;
                         }
-                        if (updatedTests[0].testDuration === null || updatedTests[0].testDuration === '') {
-                            updatedTests[0].testDuration = stats.totalTime.toFixed(0);
+                        if (updatedTests[idx].testDuration === null || updatedTests[idx].testDuration === '') {
+                            updatedTests[idx].testDuration = stats.totalTime.toFixed(0);
+                        }
+                    });
+
+                    current.tests = updatedTests;
+                    if (dataSets.length > parseInt(current.numTests)) {
+                        current.numTests = dataSets.length;
+                    }
+                    if (!current.equipmentWll) {
+                        const firstStats = processChartData(dataSets[0].data, serials);
+                        if (firstStats) current.equipmentWll = firstStats.maxWeight.toFixed(0) + ' lbs';
+                    }
+
+                    // Auto-fill spreader beam tests: distribute datasets across pick points
+                    if (current.spreaderTests) {
+                        const updatedSBTests = [...current.spreaderTests];
+                        const globalPP = parseInt(current.numPickPoints) || 2;
+                        const activeCount = parseInt(current.numTests) || 1;
+                        let dsIdx = 0;
+
+                        for (let tIdx = 0; tIdx < activeCount && tIdx < updatedSBTests.length && dsIdx < dataSets.length; tIdx++) {
+                            const testPPCount = updatedSBTests[tIdx].numPickPoints ?? globalPP;
+                            const newPPData = [...updatedSBTests[tIdx].pickPointData];
+                            let firstStats = null;
+
+                            for (let ppIdx = 0; ppIdx < testPPCount && dsIdx < dataSets.length; ppIdx++, dsIdx++) {
+                                const ds = dataSets[dsIdx];
+                                if (!ds.data || ds.data.length === 0) continue;
+                                const stats = processChartData(ds.data, serials);
+                                if (!stats) continue;
+
+                                if (!newPPData[ppIdx]?.measuredForce) {
+                                    newPPData[ppIdx] = { ...newPPData[ppIdx], measuredForce: stats.maxWeight.toFixed(0) };
+                                }
+                                if (!firstStats) firstStats = stats;
+                            }
+
+                            updatedSBTests[tIdx] = { ...updatedSBTests[tIdx], pickPointData: newPPData };
+
+                            if (firstStats) {
+                                if (updatedSBTests[tIdx].localTime === null) {
+                                    updatedSBTests[tIdx] = { ...updatedSBTests[tIdx], localTime: firstStats.peakTime };
+                                }
+                                if (!updatedSBTests[tIdx].testDuration) {
+                                    updatedSBTests[tIdx] = { ...updatedSBTests[tIdx], testDuration: firstStats.totalTime.toFixed(0) };
+                                }
+                            }
                         }
 
-                        current.tests = updatedTests;
-                        if (!current.equipmentWll) {
-                            current.equipmentWll = stats.maxWeight.toFixed(0) + ' lbs';
-                        }
+                        current.spreaderTests = updatedSBTests;
                     }
                 }
 
@@ -519,7 +577,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             });
         };
         load();
-    }, [jobId, selectedJob, firstData.length]);
+    }, [jobId, selectedJob, dataSets.length]);
 
     const handleInstrumentInput = (index, name, value) => {
         const newInstruments = [...formData.instruments];
@@ -653,6 +711,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 testResults: 'PASS',
                 itemDescription: '',
                 numPickPoints: null,
+                pickPointStart: 0,
                 pickPointData: Array(6).fill(null).map(() => ({ measuredForce: '', accept: 'YES' }))
             };
         }
@@ -885,6 +944,68 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         });
     };
 
+    const handleAiGenerate = async () => {
+        if (!aiDescription.trim()) return;
+        setAiLoading(true);
+        setAiError('');
+
+        const userMsg = aiDescription.trim();
+        const isFollowUp = aiMessages.length > 0;
+        const newMessages = [...aiMessages, { role: 'user', content: userMsg }];
+        setAiMessages(newMessages);
+        setAiDescription('');
+
+        try {
+            const result = await getElectronAPI().generateCertTemplate(
+                userMsg,
+                isFollowUp ? newMessages : null,
+                isFollowUp ? { certLayout, formData } : null
+            );
+            if (result.certLayout) setCertLayout(result.certLayout);
+            setFormData(prev => {
+                const merged = {
+                    ...prev,
+                    ...result.formData,
+                    photos: prev.photos || [],
+                    graphPageBreaks: prev.graphPageBreaks || {},
+                    sectionOrder: prev.sectionOrder
+                };
+                if (onUpdateMetadata && jobId) {
+                    onUpdateMetadata(jobId, { certData: merged });
+                }
+                return merged;
+            });
+            setAiMessages(prev => [...prev, { role: 'assistant', content: result.summary || 'Template updated.' }]);
+        } catch (err) {
+            setAiError(err.message || 'Failed to generate template');
+            setAiMessages(prev => prev.slice(0, -1));
+        } finally {
+            setAiLoading(false);
+            setTimeout(() => aiChatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+        }
+    };
+
+    const handleAiLayout = async () => {
+        setAiLayoutLoading(true);
+        try {
+            const metrics = {
+                chartCount: allChartStats.length,
+                photoCount: (formData.photos || []).length,
+                chartDataPoints: allChartStats.map(s => s?.chartData?.labels?.length || 0),
+                chartNames: dataSets.map(ds => ds?.name || ''),
+                hasPhotos: (formData.photos || []).length > 0,
+                numTests: parseInt(formData.numTests) || 0,
+                certLayout
+            };
+            const result = await getElectronAPI().optimizeCertLayout(metrics);
+            setAiLayoutOverrides(result);
+        } catch (err) {
+            alert('AI Layout Error: ' + (err.message || 'Failed'));
+        } finally {
+            setAiLayoutLoading(false);
+        }
+    };
+
     const handleLoadDraft = (draft) => {
         if (window.confirm(`Load draft "${draft.name}"? This will replace your current unsaved editor content.`)) {
             setFormData(draft.data);
@@ -1027,7 +1148,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                 ))}
                                             </div>
                                             {(formData.referenceStandards?.trim() || formData.procedureSummary?.trim()) && (
-                                                <div style={{ borderTop: '1.5px solid #000', marginTop: '10px', paddingTop: '8px' }}>
+                                                <div style={{ gridColumn: '1 / -1', borderTop: '1.5px solid #000', marginTop: '10px', paddingTop: '8px' }}>
                                                     {formData.referenceStandards?.trim() && (
                                                         <div style={{ fontSize: '0.75rem', marginBottom: '4px' }}>
                                                             <strong>Reference Standards:</strong> {formData.referenceStandards}
@@ -1217,38 +1338,34 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     } else if (certLayout === 'spreader-beam') {
                                         const globalPP = parseInt(formData.numPickPoints) || 2;
                                         const activeTests = formData.spreaderTests.slice(0, parseInt(formData.numTests));
-                                        const numPP = Math.max(globalPP, ...activeTests.map(t => t.numPickPoints ?? globalPP));
+                                        const numPP = Math.max(globalPP, ...activeTests.map(t => (t.pickPointStart || 0) + (t.numPickPoints ?? globalPP)));
+                                        const ppColWidth = numPP >= 5 ? '58px' : numPP >= 3 ? '70px' : '85px';
+                                        const ppFontSize = numPP >= 5 ? '0.58rem' : '0.65rem';
+                                        const valFontSize = numPP >= 5 ? '0.75rem' : '0.85rem';
                                         content = (
-                                            <table className="cert-table">
+                                            <table className="cert-table" style={{ tableLayout: 'fixed', width: '100%' }}>
                                                 <thead>
                                                     <tr>
-                                                        <th style={{ width: '35px' }}>Item</th>
+                                                        <th style={{ width: '28px' }}>Item</th>
                                                         <th>Description</th>
-                                                        <th style={{ width: '65px' }}>Time</th>
-                                                        <th style={{ width: '65px' }}>Dur.</th>
+                                                        <th style={{ width: '45px', fontSize: '0.6rem' }}>Time</th>
+                                                        <th style={{ width: '50px', fontSize: '0.6rem' }}>Dur.</th>
                                                         {formData.pickPoints.slice(0, numPP).map((pp, i) => (
-                                                            <th key={i} style={{ width: '85px', fontSize: '0.65rem' }}>{pp.label || `PP ${i+1}`}</th>
+                                                            <th key={i} style={{ width: ppColWidth, fontSize: ppFontSize }}>{pp.label || `PP ${i+1}`}</th>
                                                         ))}
-                                                        <th style={{ width: '95px', fontSize: '0.65rem' }}>Total</th>
-                                                        <th style={{ width: '50px' }}>Accept</th>
+                                                        <th style={{ width: numPP >= 5 ? '65px' : '80px', fontSize: ppFontSize }}>Total</th>
+                                                        <th style={{ width: '38px', fontSize: '0.6rem' }}>Accept</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
                                                     <tr>
-                                                        <td></td>
-                                                        <td className="text-left" colSpan={4 + numPP} style={{ paddingBottom: '8px' }}>
-                                                            <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                        <td colSpan={5 + numPP} className="text-left" style={{ paddingBottom: '4px', paddingTop: '4px' }}>
+                                                            <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '12px', rowGap: '1px', fontSize: '0.7rem' }}>
                                                                 <div><strong style={{ color: '#555' }}>Beam Manufacturer:</strong> {formData.beamManufacturer || formData.equipmentManufacturer || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Beam S/N:</strong> {formData.beamSerial || formData.equipmentSerial || 'N/A'}</div>
-                                                                <div><strong style={{ color: '#555' }}>Beam Length:</strong> {formData.beamLength || 'N/A'}</div>
+                                                                {formData.beamLength && formData.beamLength !== 'N/A' && <div><strong style={{ color: '#555' }}>Length:</strong> {formData.beamLength}</div>}
                                                                 <div><strong style={{ color: '#555' }}>Beam WLL:</strong> {formData.beamWll || formData.equipmentWll || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Target Test Load:</strong> {formData.targetLoad || 'N/A'}</div>
-                                                            </div>
-                                                            <div style={{ marginBottom: '2px', fontSize: '0.7rem' }}>
-                                                                <strong>Pick Points:</strong>{' '}
-                                                                {formData.pickPoints.slice(0, numPP).map((pp, i) => (
-                                                                    <span key={i}>{pp.label}{pp.position ? ` (${pp.position})` : ''}{i < numPP - 1 ? ' | ' : ''}</span>
-                                                                ))}
                                                             </div>
                                                         </td>
                                                     </tr>
@@ -1256,28 +1373,29 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                         .slice(0, parseInt(formData.numTests))
                                                         .map((test, index) => (
                                                             <tr key={index}>
-                                                                <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
-                                                                <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
-                                                                    <div className="font-bold" style={{ fontSize: '0.9rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                <td style={{ verticalAlign: 'top', paddingTop: '6px', fontSize: '0.8rem' }}>{index + 1}</td>
+                                                                <td className="text-left" style={{ paddingTop: '6px', paddingBottom: '4px', overflow: 'hidden' }}>
+                                                                    <div className="font-bold" style={{ fontSize: '0.82rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '2px', lineHeight: '1.15' }}>
                                                                         {test.itemDescription || formData.equipmentTested || 'Spreader Beam Load Test'}
                                                                     </div>
-                                                                    <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
-                                                                        <strong>Type:</strong> {test.loadType} | <strong>TEST LOAD:</strong> {test.wllPercentage || '100%'} WLL | <strong>Pick Pts:</strong> {test.numPickPoints ?? globalPP}
+                                                                    <div style={{ fontSize: '0.65rem', marginTop: '1px', lineHeight: '1.2' }}>
+                                                                        <strong>Type:</strong> {test.loadType} | <strong>TEST LOAD:</strong> {test.wllPercentage || '100%'} WLL
                                                                     </div>
                                                                 </td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.localTime}</td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px', fontSize: '0.8rem' }}>{test.testDuration}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '6px', fontSize: '0.72rem' }}>{test.localTime}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '6px', fontSize: '0.72rem' }}>{test.testDuration}</td>
                                                                 {Array.from({ length: numPP }, (_, ppIdx) => {
                                                                     const testPPCount = test.numPickPoints ?? globalPP;
-                                                                    const ppd = test.pickPointData[ppIdx];
-                                                                    const inUse = ppIdx < testPPCount;
+                                                                    const start = test.pickPointStart || 0;
+                                                                    const inUse = ppIdx >= start && ppIdx < start + testPPCount;
+                                                                    const ppd = inUse ? test.pickPointData[ppIdx - start] : null;
                                                                     return (
-                                                                        <td key={ppIdx} className="force-val" style={{ fontSize: '0.85rem', verticalAlign: 'middle', paddingTop: '8px', color: inUse ? undefined : '#999' }}>
-                                                                            {inUse ? (ppd?.measuredForce ? `${ppd.measuredForce} lbs` : '--') : '—'}
+                                                                        <td key={ppIdx} className="force-val" style={{ fontSize: valFontSize, verticalAlign: 'middle', paddingTop: '6px', color: inUse ? undefined : '#999' }}>
+                                                                            {inUse ? (ppd?.measuredForce ? `${Number(String(ppd.measuredForce).replace(/,/g, '')).toLocaleString()} lbs` : '--') : '—'}
                                                                         </td>
                                                                     );
                                                                 })}
-                                                                <td className="force-val" style={{ fontSize: '0.85rem', fontWeight: 700, verticalAlign: 'middle', paddingTop: '8px' }}>
+                                                                <td className="force-val" style={{ fontSize: valFontSize, fontWeight: 700, verticalAlign: 'middle', paddingTop: '6px' }}>
                                                                     {(() => {
                                                                         const testPPCount = test.numPickPoints ?? globalPP;
                                                                         const total = test.pickPointData.slice(0, testPPCount).reduce((sum, ppd) => {
@@ -1287,7 +1405,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                         return total > 0 ? `${total.toLocaleString()} lbs` : '--';
                                                                     })()}
                                                                 </td>
-                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '6px', fontSize: '0.78rem' }}>{test.accept}</td>
                                                             </tr>
                                                         ))}
                                                 </tbody>
@@ -1394,14 +1512,23 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                     </div>
                                                 </div>
                                             )}
-                                            <div style={{ marginTop: '4px', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
-                                                Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
-                                            </div>
                                         </>
                                     );
                                     break;
-                                case 'graphs':
+                                case 'graphs': {
                                     if (allChartStats.length === 0) return null;
+                                    const gcCount = allChartStats.length;
+                                    const gcPhotos = formData.photos || [];
+                                    const gcHasPhotos = gcPhotos.length > 0;
+                                    const GC_USABLE = 930;
+                                    const GC_CHART_OH = 22;
+                                    const GC_PHOTO_OH = 28;
+                                    const gcTotalOH = gcCount * GC_CHART_OH + (gcHasPhotos ? GC_PHOTO_OH : 0);
+                                    const gcContentPx = GC_USABLE - gcTotalOH;
+                                    const gcPhotoWeight = !gcHasPhotos ? 0 : gcPhotos.length === 1 ? 0.7 : gcPhotos.length === 2 ? 0.9 : 1.1;
+                                    const gcUnits = gcCount + gcPhotoWeight;
+                                    const gcUnitPx = gcUnits > 0 ? gcContentPx / gcUnits : gcContentPx;
+                                    const gcChartH = Math.max(80, Math.min(400, Math.floor(gcUnitPx)));
                                     content = (
                                         <>
                                             {allChartStats.map((stats, idx) => (
@@ -1410,12 +1537,13 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                     breakInside: 'avoid',
                                                     pageBreakBefore: formData.graphPageBreaks[idx] ? 'always' : 'auto',
                                                     breakBefore: formData.graphPageBreaks[idx] ? 'page' : 'auto',
-                                                    marginTop: '20px'
+                                                    marginTop: gcCount >= 4 ? 2 : 6,
+                                                    padding: gcCount >= 4 ? '2px 4px' : '4px'
                                                 }}>
-                                                    <div className="cert-chart-header">
-                                                        {allChartStats.length > 1 ? `LOAD TEST GRAPH #${idx + 1} (${dataSets[idx]?.name || 'N/A'})` : (dataSets[idx]?.name || 'LOAD TEST GRAPH')}
+                                                    <div className="cert-chart-header" style={gcCount >= 3 ? { fontSize: '0.6rem', marginBottom: '1px', paddingBottom: '1px' } : undefined}>
+                                                        {gcCount > 1 ? `LOAD TEST GRAPH #${idx + 1} (${dataSets[idx]?.name || 'N/A'})` : (dataSets[idx]?.name || 'LOAD TEST GRAPH')}
                                                     </div>
-                                                    <div className="cert-chart-container" style={{ height: '280px' }}>
+                                                    <div className="cert-chart-container" style={{ height: `${gcChartH}px` }}>
                                                         <CertChart
                                                             stats={stats}
                                                             yAxisLabel={dataSets[idx]?.yAxisLabel || `Weight (${displayUnit})`}
@@ -1428,21 +1556,48 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                         </>
                                     );
                                     break;
-                                case 'photos':
+                                }
+                                case 'photos': {
                                     if (!formData.photos || formData.photos.length === 0) return null;
+                                    const ppPhotos = formData.photos;
+                                    const ppCount = ppPhotos.length;
+                                    const ppChartCount = allChartStats.length;
+                                    const PP_USABLE = 930;
+                                    const PP_CHART_OH = 22;
+                                    const PP_PHOTO_OH = 28;
+                                    const ppTotalOH = (ppChartCount > 0 ? ppChartCount * PP_CHART_OH : 0) + PP_PHOTO_OH;
+                                    const ppContentPx = PP_USABLE - ppTotalOH;
+                                    const ppPhotoWeight = ppCount === 1 ? 0.7 : ppCount === 2 ? 0.9 : 1.1;
+                                    const ppUnits = ppChartCount + ppPhotoWeight;
+                                    const ppUnitPx = ppUnits > 0 ? ppContentPx / ppUnits : ppContentPx;
+                                    const ppTotalPx = Math.max(100, Math.floor(ppUnitPx * ppPhotoWeight));
+                                    const ppRows = ppCount <= 2 ? 1 : 2;
+                                    const ppItemH = Math.floor((ppTotalPx - (ppRows > 1 ? 6 : 0)) / ppRows);
+                                    const ppCols = ppCount <= 2 ? ppCount : 2;
                                     content = (
-                                        <div className="cert-photos-section">
-                                            <div className="cert-photos-header">SITE PHOTOS</div>
-                                            <div className="cert-photos-grid">
-                                                {formData.photos.map((photo, index) => (
-                                                    <div key={index} className="cert-photo-item">
-                                                        <img src={photo} alt={`Site photo ${index + 1}`} />
+                                        <div className="cert-photos-section" style={{ marginTop: '8px', padding: '4px 4px 6px' }}>
+                                            <div className="cert-photos-header" style={{ fontSize: '0.65rem', marginBottom: '4px', paddingBottom: '2px' }}>SITE PHOTOS</div>
+                                            <div style={{
+                                                display: 'grid',
+                                                gridTemplateColumns: ppCount === 1 ? '1fr' : `repeat(${ppCols}, 1fr)`,
+                                                gap: '6px',
+                                                justifyItems: ppCount === 1 ? 'center' : 'stretch'
+                                            }}>
+                                                {ppPhotos.map((photo, index) => (
+                                                    <div key={index} style={{
+                                                        overflow: 'hidden',
+                                                        border: '0.75px solid #000',
+                                                        height: `${ppItemH}px`,
+                                                        maxWidth: ppCount === 1 ? '60%' : '100%'
+                                                    }}>
+                                                        <img src={photo} alt={`Site photo ${index + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#f9f9f9', display: 'block' }} />
                                                     </div>
                                                 ))}
                                             </div>
                                         </div>
                                     );
                                     break;
+                                }
                                 default:
                                     return null;
                             }
@@ -1467,17 +1622,31 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         const mainSections = sections.filter(isMain);
                         const otherSections = sections.filter(id => !isMain(id));
 
+                        const disclaimerEl = (
+                            <div style={{ marginTop: '4px', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
+                                Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
+                            </div>
+                        );
+
+                        const remainingSections = sections.filter(id => ['graphs', 'photos'].includes(id));
+                        const hasPage2 = remainingSections.some(id => {
+                            if (id === 'graphs') return allChartStats.length > 0;
+                            if (id === 'photos') return formData.photos && formData.photos.length > 0;
+                            return false;
+                        });
+
                         return (
                             <>
                                 <div className="cert-main-page">
                                     {mainSections.map(id => renderSectionContent(id))}
+                                    {!hasPage2 && disclaimerEl}
                                 </div>
                             </>
                         );
                     })()}
                 </div>
 
-                {/* Remaining pages: Graphs and Photos */}
+                {/* Page 2: Graphs, Photos, and Disclaimer — auto-layout or AI overrides */}
                 {(() => {
                     const remainingSections = (formData.sectionOrder || ['header', 'infoGrid', 'testTable', 'footer', 'graphs', 'photos'])
                         .filter(id => ['graphs', 'photos'].includes(id));
@@ -1487,60 +1656,103 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         return false;
                     });
                     if (!hasRemaining) return null;
+
+                    const chartCount = allChartStats.length;
+                    const photos = formData.photos || [];
+                    const photoCount = photos.length;
+                    const hasGraphs = chartCount > 0;
+                    const hasPhotos = photoCount > 0;
+                    const lo = aiLayoutOverrides; // AI layout overrides (if any)
+
+                    // --- Compute default layout ---
+                    const USABLE_PX = 930;
+                    const CHART_OVERHEAD = 22;
+                    const PHOTO_OVERHEAD = 28;
+                    const totalOverhead = (hasGraphs ? chartCount * CHART_OVERHEAD : 0) + (hasPhotos ? PHOTO_OVERHEAD : 0);
+                    const contentPx = USABLE_PX - totalOverhead;
+                    const defPhotoWeight = !hasPhotos ? 0 : photoCount === 1 ? 0.7 : photoCount === 2 ? 0.9 : 1.1;
+                    const defUnits = chartCount + defPhotoWeight;
+                    const defUnitPx = defUnits > 0 ? contentPx / defUnits : contentPx;
+                    const defChartH = hasGraphs ? Math.max(80, Math.min(400, Math.floor(defUnitPx))) : 0;
+                    const defPhotoRows = photoCount <= 2 ? 1 : 2;
+                    const defPhotoTotalPx = hasPhotos ? Math.max(100, Math.floor(defUnitPx * defPhotoWeight)) : 0;
+                    const defPhotoItemH = hasPhotos ? Math.floor((defPhotoTotalPx - (defPhotoRows > 1 ? 6 : 0)) / defPhotoRows) : 0;
+                    const defPhotoCols = photoCount <= 2 ? photoCount : 2;
+
+                    // --- Apply AI overrides or use defaults ---
+                    const chartHeights = lo?.chartHeights || allChartStats.map(() => defChartH);
+                    const photoCols = lo?.photoCols ?? defPhotoCols;
+                    const photoItemHeight = lo?.photoHeight ?? defPhotoItemH;
+                    const pageBreaks = lo?.graphPageBreaks || formData.graphPageBreaks || {};
+                    const graphSpacing = lo?.graphSpacing ?? (chartCount >= 4 ? 3 : 6);
+
                     return (
-                        <div className="certificate-paper" style={{ paddingLeft: '44px', pageBreakBefore: 'always', breakBefore: 'page' }}>
-                            {remainingSections.map(sectionId => {
-                                let content = null;
-                                switch (sectionId) {
-                                    case 'graphs':
-                                        if (allChartStats.length === 0) return null;
-                                        content = (
-                                            <>
-                                                {allChartStats.map((stats, idx) => (
-                                                    <div key={idx} className="cert-chart-section" style={{
-                                                        pageBreakInside: 'avoid',
-                                                        breakInside: 'avoid',
-                                                        pageBreakBefore: formData.graphPageBreaks[idx] ? 'always' : 'auto',
-                                                        breakBefore: formData.graphPageBreaks[idx] ? 'page' : 'auto',
-                                                        marginTop: '20px'
-                                                    }}>
-                                                        <div className="cert-chart-header">
-                                                            {allChartStats.length > 1 ? `LOAD TEST GRAPH #${idx + 1} (${dataSets[idx]?.name || 'N/A'})` : (dataSets[idx]?.name || 'LOAD TEST GRAPH')}
-                                                        </div>
-                                                        <div className="cert-chart-container" style={{ height: '280px' }}>
-                                                            <CertChart
-                                                                stats={stats}
-                                                                yAxisLabel={dataSets[idx]?.yAxisLabel || 'Weight (lbs)'}
-                                                                xAxisLabel="Elapsed Time (min)"
-                                                                isPrint={true}
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </>
-                                        );
-                                        break;
-                                    case 'photos':
-                                        if (!formData.photos || formData.photos.length === 0) return null;
-                                        content = (
-                                            <div className="cert-photos-section">
-                                                <div className="cert-photos-header">SITE PHOTOS</div>
-                                                <div className="cert-photos-grid">
-                                                    {formData.photos.map((photo, index) => (
-                                                        <div key={index} className="cert-photo-item">
-                                                            <img src={photo} alt={`Site photo ${index + 1}`} />
-                                                        </div>
-                                                    ))}
-                                                </div>
+                        <div className="certificate-paper cert-page-2" style={{ paddingLeft: '44px', pageBreakBefore: 'always', breakBefore: 'page', display: 'flex', flexDirection: 'column', minHeight: '275mm' }}>
+                            <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                                {/* Graphs */}
+                                {hasGraphs && allChartStats.map((stats, idx) => {
+                                    const h = chartHeights[idx] ?? defChartH;
+                                    const shouldBreak = pageBreaks[idx] || false;
+                                    return (
+                                        <div key={idx} className="cert-chart-section" style={{
+                                            pageBreakInside: 'avoid',
+                                            breakInside: 'avoid',
+                                            pageBreakBefore: shouldBreak ? 'always' : 'auto',
+                                            breakBefore: shouldBreak ? 'page' : 'auto',
+                                            marginTop: idx === 0 ? 0 : graphSpacing,
+                                            marginBottom: 0,
+                                            padding: '3px 4px',
+                                            flex: `1 1 ${h}px`,
+                                            minHeight: `${Math.min(h, 80)}px`
+                                        }}>
+                                            <div className="cert-chart-header" style={{ fontSize: chartCount >= 3 ? '0.6rem' : '0.7rem', marginBottom: '2px', paddingBottom: '2px' }}>
+                                                {chartCount > 1 ? `LOAD TEST GRAPH #${idx + 1} (${dataSets[idx]?.name || 'N/A'})` : (dataSets[idx]?.name || 'LOAD TEST GRAPH')}
                                             </div>
-                                        );
-                                        break;
-                                    default:
-                                        return null;
-                                }
-                                if (!content) return null;
-                                return <div key={sectionId}>{content}</div>;
-                            })}
+                                            <div className="cert-chart-container" style={{ height: `${h}px` }}>
+                                                <CertChart
+                                                    stats={stats}
+                                                    yAxisLabel={dataSets[idx]?.yAxisLabel || 'Weight (lbs)'}
+                                                    xAxisLabel="Elapsed Time (min)"
+                                                    isPrint={true}
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+
+                                {/* Photos — adaptive grid */}
+                                {hasPhotos && (
+                                    <div className="cert-photos-section" style={{
+                                        marginTop: hasGraphs ? '6px' : 0,
+                                        padding: '4px 4px 6px',
+                                        flex: hasGraphs ? '0 0 auto' : '1 1 auto'
+                                    }}>
+                                        <div className="cert-photos-header" style={{ fontSize: '0.65rem', marginBottom: '4px', paddingBottom: '2px' }}>SITE PHOTOS</div>
+                                        <div style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: photoCount === 1 ? '1fr' : `repeat(${photoCols}, 1fr)`,
+                                            gap: '6px',
+                                            justifyItems: photoCount === 1 ? 'center' : 'stretch'
+                                        }}>
+                                            {photos.map((photo, index) => (
+                                                <div key={index} style={{
+                                                    overflow: 'hidden',
+                                                    border: '0.75px solid #000',
+                                                    height: `${photoItemHeight}px`,
+                                                    maxWidth: photoCount === 1 ? '60%' : '100%'
+                                                }}>
+                                                    <img src={photo} alt={`Site photo ${index + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#f9f9f9', display: 'block' }} />
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Disclaimer pinned to bottom of page 2 */}
+                            <div style={{ marginTop: 'auto', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
+                                Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
+                            </div>
                         </div>
                     );
                 })()}
@@ -1577,6 +1789,14 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 <option key={t.id} value={t.id} title={t.description}>{t.name}</option>
                             ))}
                         </select>
+                        <button
+                            onClick={() => setShowAiGenerator(true)}
+                            className="action-btn secondary small"
+                            title="Describe your test and let AI generate a certificate template"
+                            style={{ fontSize: '0.85rem', padding: '6px 14px', whiteSpace: 'nowrap' }}
+                        >
+                            🤖 AI Generate
+                        </button>
                         <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
                             Job: <strong style={{ color: 'white' }}>{job?.metadata?.jobNumber || 'N/A'}</strong>
                             <span style={{ marginLeft: '10px', fontSize: '0.7rem', opacity: 0.6 }}>ID: {jobId}</span>
@@ -1622,6 +1842,29 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     <button onClick={showPreview} className="action-btn large">
                         👁️ Preview Certificate
                     </button>
+                    {(allChartStats.length > 0 || (formData.photos && formData.photos.length > 0)) && (
+                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                            <button
+                                onClick={handleAiLayout}
+                                className="action-btn secondary small"
+                                disabled={aiLayoutLoading}
+                                title="Use AI to optimize the graph and photo layout on page 2"
+                                style={{ fontSize: '0.8rem', padding: '5px 12px', whiteSpace: 'nowrap' }}
+                            >
+                                {aiLayoutLoading ? '🔄 Optimizing...' : '🤖 AI Layout'}
+                            </button>
+                            {aiLayoutOverrides && (
+                                <button
+                                    onClick={() => setAiLayoutOverrides(null)}
+                                    className="action-btn secondary small"
+                                    title="Reset to automatic layout"
+                                    style={{ fontSize: '0.75rem', padding: '4px 8px', color: '#ff6b6b', borderColor: '#cc3333' }}
+                                >
+                                    Reset
+                                </button>
+                            )}
+                        </div>
+                    )}
                 </div>
             </div>
 
@@ -2142,6 +2385,14 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             </select>
                         </div>
                         <div className="form-group">
+                            <label>Starting At</label>
+                            <select value={test.pickPointStart || 0} onChange={(e) => handleSpreaderTestInput(index, 'pickPointStart', parseInt(e.target.value))}>
+                                {formData.pickPoints.slice(0, parseInt(formData.numPickPoints)).map((pp, i) => (
+                                    <option key={i} value={i}>{pp.label || `PP ${i + 1}`}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="form-group">
                             <label>Local Time (hr:min)</label>
                             <input value={test.localTime || ''} onChange={(e) => handleSpreaderTestInput(index, 'localTime', e.target.value)} placeholder="00:00" />
                         </div>
@@ -2175,15 +2426,15 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     </div>
 
                     {/* Per-pick-point measured forces */}
-                    {(() => { const testPP = test.numPickPoints ?? parseInt(formData.numPickPoints); return (
+                    {(() => { const testPP = test.numPickPoints ?? parseInt(formData.numPickPoints); const ppStart = test.pickPointStart || 0; return (
                     <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
                         <div style={{ fontSize: '0.78rem', color: 'var(--yellow-accent)', fontWeight: 700, marginBottom: '10px' }}>MEASURED FORCE AT EACH PICK POINT ({testPP})</div>
                         <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(testPP, 3)}, 1fr)`, gap: '10px' }}>
                             {test.pickPointData.slice(0, testPP).map((ppd, ppIdx) => (
                                 <div key={ppIdx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                                     <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
-                                        {formData.pickPoints[ppIdx]?.label || `Pick Point ${ppIdx + 1}`}
-                                        {formData.pickPoints[ppIdx]?.position && <span style={{ opacity: 0.6 }}> ({formData.pickPoints[ppIdx].position})</span>}
+                                        {formData.pickPoints[ppStart + ppIdx]?.label || `Pick Point ${ppStart + ppIdx + 1}`}
+                                        {formData.pickPoints[ppStart + ppIdx]?.position && <span style={{ opacity: 0.6 }}> ({formData.pickPoints[ppStart + ppIdx].position})</span>}
                                     </label>
                                     <div style={{ display: 'flex', gap: '6px' }}>
                                         <input
@@ -2569,6 +2820,128 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     👁️ Preview Full Certificate
                 </button>
             </div>
+
+            {showAiGenerator && (
+                <div className="modal-overlay" onClick={() => !aiLoading && setShowAiGenerator(false)}>
+                    <div className="wizard-card" style={{ maxWidth: '700px', width: '90%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', overflow: 'visible' }} onClick={e => e.stopPropagation()}>
+                        <div className="wizard-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <h3>AI Certificate Generator</h3>
+                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                {aiMessages.length > 0 && (
+                                    <button
+                                        onClick={() => { setAiMessages([]); setAiError(''); }}
+                                        className="action-btn secondary small"
+                                        disabled={aiLoading}
+                                        style={{ fontSize: '0.75rem', padding: '3px 10px' }}
+                                    >
+                                        New Chat
+                                    </button>
+                                )}
+                                <button onClick={() => !aiLoading && setShowAiGenerator(false)} className="close-btn">&times;</button>
+                            </div>
+                        </div>
+                        <div className="wizard-body" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                            {aiMessages.length === 0 && (
+                                <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                                    Describe the load test you need to perform. Include equipment, load ratings, number of tests, standards, and any special procedures. OSCAR will generate a matching certificate template. You can send follow-up messages to refine it.
+                                </p>
+                            )}
+
+                            {aiMessages.length > 0 && (
+                                <div style={{
+                                    flex: 1,
+                                    overflowY: 'auto',
+                                    marginBottom: '12px',
+                                    padding: '8px',
+                                    background: 'rgba(0,0,0,0.2)',
+                                    borderRadius: '6px',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '8px',
+                                    minHeight: '120px',
+                                    maxHeight: '340px'
+                                }}>
+                                    {aiMessages.map((msg, i) => (
+                                        <div key={i} style={{
+                                            alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                                            maxWidth: '85%',
+                                            padding: '8px 12px',
+                                            borderRadius: msg.role === 'user' ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
+                                            background: msg.role === 'user' ? 'var(--accent)' : 'rgba(255,255,255,0.08)',
+                                            color: 'var(--text-primary)',
+                                            fontSize: '0.85rem',
+                                            lineHeight: '1.4',
+                                            whiteSpace: 'pre-wrap'
+                                        }}>
+                                            {msg.content}
+                                        </div>
+                                    ))}
+                                    {aiLoading && (
+                                        <div style={{
+                                            alignSelf: 'flex-start',
+                                            padding: '8px 12px',
+                                            borderRadius: '12px 12px 12px 2px',
+                                            background: 'rgba(255,255,255,0.08)',
+                                            fontSize: '0.85rem',
+                                            color: 'var(--text-secondary)'
+                                        }}>
+                                            Generating...
+                                        </div>
+                                    )}
+                                    <div ref={aiChatEndRef} />
+                                </div>
+                            )}
+
+                            <textarea
+                                value={aiDescription}
+                                onChange={(e) => setAiDescription(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey && aiDescription.trim() && !aiLoading) {
+                                        e.preventDefault();
+                                        handleAiGenerate();
+                                    }
+                                }}
+                                placeholder={aiMessages.length === 0
+                                    ? "e.g. We're testing a 50-ton pedestal crane with two hooks (main 40T, aux 10T) per API 2C. Need proof load at 125% SWL for both hooks, plus a boom functional test. Customer is Gulf Offshore Services at their Galveston yard."
+                                    : "e.g. Add a winch functional test at 7,500 lbs..."
+                                }
+                                style={{
+                                    width: '100%',
+                                    minHeight: aiMessages.length > 0 ? '60px' : '140px',
+                                    resize: 'vertical',
+                                    fontSize: '0.95rem',
+                                    background: 'var(--bg-dark)',
+                                    color: 'var(--text-primary)',
+                                    border: '1px solid var(--border)',
+                                    borderRadius: '6px',
+                                    padding: '12px',
+                                    fontFamily: 'inherit'
+                                }}
+                                disabled={aiLoading}
+                            />
+                            {aiError && (
+                                <p style={{ color: '#ff6b6b', fontSize: '0.85rem', marginTop: '8px' }}>{aiError}</p>
+                            )}
+                            <div className="wizard-actions" style={{ marginTop: '12px' }}>
+                                <button
+                                    className="action-btn secondary"
+                                    onClick={() => { setShowAiGenerator(false); setAiError(''); }}
+                                    disabled={aiLoading}
+                                >
+                                    {aiMessages.length > 0 ? 'Done' : 'Cancel'}
+                                </button>
+                                <button
+                                    className="action-btn"
+                                    onClick={handleAiGenerate}
+                                    disabled={aiLoading || !aiDescription.trim()}
+                                >
+                                    {aiLoading ? '🔄 Generating...' : aiMessages.length > 0 ? 'Send' : '🤖 Generate Template'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

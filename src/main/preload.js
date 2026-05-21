@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     fetchEquipmentForJob: (jobNum) => ipcRenderer.invoke('sharepoint:fetchEquipmentForJob', jobNum),
     logout: () => ipcRenderer.invoke('sharepoint:logout'),
     determineStandard: (answers) => ipcRenderer.invoke('ai:determineStandard', answers),
+    generateCertTemplate: (description, history, currentState) => ipcRenderer.invoke('ai:generateCertTemplate', description, history, currentState),
+    optimizeCertLayout: (metrics) => ipcRenderer.invoke('ai:optimizeCertLayout', metrics),
     onAuthMessage: (callback) => ipcRenderer.on('auth-message', (_event, value) => callback(value)),
     toggleKeepAwake: (enabled) => ipcRenderer.invoke('t24:toggleKeepAwake', enabled),
     getKeepStatus: () => ipcRenderer.invoke('t24:getKeepStatus'),

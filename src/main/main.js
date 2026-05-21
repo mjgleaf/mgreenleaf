@@ -1928,6 +1928,172 @@ async function determineStandard(event, answers) {
     }
 }
 
+async function generateCertTemplate(event, description, conversationHistory, currentState) {
+    const settings = loadSettings();
+    const openaiKey = process.env.OPENAI_API_KEY || settings.openaiKey;
+    if (!openaiKey) throw new Error('OpenAI key missing. Please add your API key in Settings.');
+
+    const cleanKey = openaiKey.trim();
+
+    const systemPrompt = `You are an expert in industrial load testing certificate generation for Hydro-Wates / Scofield Group, LLC.
+
+You must select ONE of 4 certificate layouts and generate a formData object that pre-fills the certificate editor.
+
+LAYOUTS:
+
+1. "crane-hook" — Standard crane/hoist hook testing. Use when the job tests crane hooks, hoists, or winches with measurable hook forces.
+   Test array key: "tests"
+   Per-test fields: { loadType: "Static"|"Dynamic", wllPercentage: string, measuredForce: null, localTime: null, testDuration: string, accept: "YES", testResults: "PASS", hookTested: string, itemDescription: string, hookData: [] }
+
+2. "spreader-beam" — Spreader/lifting beams with multiple pick points.
+   Test array key: "spreaderTests"
+   Per-test fields: { loadType: "Static"|"Dynamic", wllPercentage: string, testDuration: string, localTime: null, accept: "YES", testResults: "PASS", itemDescription: string, numPickPoints: number, pickPointStart: 0, pickPointData: [{ measuredForce: "", accept: "YES" }] }
+   Extra form fields: beamLength, beamManufacturer, beamSerial, beamWll, numPickPoints, pickPoints: [{ label: string, position: string, measuredForce: "", accept: "YES" }]
+
+3. "steel-weight" — Dead-weight / calibrated-weight tests. The MOST FLEXIBLE layout — use it whenever the test doesn't clearly fit another layout.
+   Test array key: "steelWeightTests"
+   Per-test fields: { loadType: "Static"|"Dynamic", equipmentTested: string, swl: string, testLoad: string, localTime: null, testDuration: string, description: string, accept: "YES", testResults: "PASS", useLoadCell: boolean, loadCellSerial: "", loadCellCapacity: string, loadCellReading: "" }
+
+4. "gangway" — Accommodation ladder / gangway with flow-meter & deflection measurements.
+   Test array key: "gangwayTests"
+   Per-test fields: { loadType: "Static"|"Dynamic", equipmentTested: string, swl: string, testLoad: string, flowMeterBefore: "", flowMeterAtLoad: "", flowMeterUnits: "gal", deflectionBefore: "", deflectionAfter: "", deflectionRecovered: "", deflectionUnits: "in", localTime: null, testDuration: string, description: string, accept: "YES", testResults: "PASS" }
+
+COMMON FORM FIELDS (include in every response):
+soldTo, facilityLocation, buyer, projectRef, customerPO (leave "" if unknown),
+testDate (leave "" to use today's date),
+procedureSummary (write a detailed multi-sentence procedure summary),
+referenceStandards (applicable codes like "ASME B30.2, OSHA 1910.179"),
+instruments: [{ instrument: string, capacity: string, serialNo: "", dataLink: string, accuracy: string }],
+numTests: number,
+testResults: "PASS"
+
+For crane-hook layout also include: equipmentTested, equipmentManufacturer, equipmentSerial, equipmentWll, hooks: [{ name: string, manufacturer: "", serial: "", wll: string }]
+
+RULES:
+- Pick the layout that BEST fits the described test. Default to "steel-weight" when unsure.
+- Create the exact number of test records described. If the user doesn't specify, infer from context.
+- Fill every field you can infer. Leave unknown fields as empty strings "".
+- Write detailed description fields for each test step.
+- Use realistic overload percentages per industry norms (e.g. 125% proof load, 150% for ASME B30.2 cranes).
+- Return ONLY a raw JSON object with keys: "certLayout" (string), "formData" (object), and "summary" (a short 1-2 sentence description of what you generated or changed).
+- When modifying an existing certificate, return the COMPLETE updated formData — not just the changed fields. Preserve all existing data unless the user asks to change it.`;
+
+    const isFollowUp = conversationHistory && conversationHistory.length > 0;
+
+    const messages = [{ role: "system", content: systemPrompt }];
+
+    if (isFollowUp) {
+        // Inject the current form state so the AI knows what exists
+        const stateMsg = `CURRENT CERTIFICATE STATE:\ncertLayout: "${currentState.certLayout}"\nformData: ${JSON.stringify(currentState.formData, null, 0)}`;
+        messages.push({ role: "system", content: stateMsg });
+
+        // Replay conversation history (user/assistant pairs)
+        for (const msg of conversationHistory) {
+            if (msg.role === 'user') {
+                messages.push({ role: "user", content: msg.content });
+            } else if (msg.role === 'assistant') {
+                messages.push({ role: "assistant", content: msg.content });
+            }
+        }
+    } else {
+        messages.push({ role: "user", content: description });
+    }
+
+    try {
+        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model: "gpt-4o",
+            messages,
+            response_format: { type: "json_object" },
+            temperature: 0.2
+        }, {
+            headers: {
+                'Authorization': `Bearer ${cleanKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const content = response.data.choices[0].message.content;
+        const parsed = JSON.parse(content);
+
+        if (!parsed.certLayout || !parsed.formData) {
+            throw new Error('AI response missing required certLayout or formData');
+        }
+
+        const validLayouts = ['crane-hook', 'spreader-beam', 'steel-weight', 'gangway'];
+        if (!validLayouts.includes(parsed.certLayout)) {
+            parsed.certLayout = 'steel-weight';
+        }
+
+        return parsed;
+    } catch (err) {
+        const errorDetail = err.response?.data?.error?.message || err.message;
+        console.error('AI Template Error:', err.response?.data || err.message);
+        throw new Error(`AI Template Generator Error: ${errorDetail}`);
+    }
+}
+
+async function optimizeCertLayout(event, metrics) {
+    const settings = loadSettings();
+    const openaiKey = process.env.OPENAI_API_KEY || settings.openaiKey;
+    if (!openaiKey) throw new Error('OpenAI key missing. Please add your API key in Settings.');
+
+    const cleanKey = openaiKey.trim();
+
+    const systemPrompt = `You are a document layout expert for proof-load test certificates. You optimize how graphs and photos are arranged on a printed A4 page (275mm tall, usable content area ~930px at screen resolution).
+
+Given metrics about the certificate content, return the optimal layout parameters as a JSON object.
+
+AVAILABLE PARAMETERS:
+- "chartHeights": number[] — height in pixels for EACH chart (array length must match chartCount). Larger = more readable. Charts with more data points benefit from more height.
+- "photoCols": number — columns in the photo grid (1, 2, 3, or 4)
+- "photoHeight": number — height in pixels for each photo cell
+- "graphPageBreaks": { "0": false, "1": false, ... } — whether each graph should start on a new printed page (use sparingly — only when content won't fit one page)
+- "graphSpacing": number — pixel gap between charts (3-10)
+
+CONSTRAINTS:
+- Total content must fit within ~930px vertically (unless using page breaks)
+- Each chart needs ~22px overhead (header + borders) beyond its chartHeight
+- Photo section needs ~28px overhead beyond the photo grid
+- Minimum chart height: 80px. Maximum: 400px.
+- Minimum photo height: 60px. Maximum: 300px.
+- Charts with more data points deserve more height for readability
+- Photos should be large enough to see detail but not so large they crowd the graphs
+- If everything fits on one page, do NOT use page breaks
+- When content overflows one page, use graphPageBreaks strategically to split across pages
+
+GOALS:
+- Fill the page evenly — no large empty gaps
+- Prioritize graph readability (graphs are the most important content)
+- Photos should complement, not dominate
+- Professional, balanced appearance
+
+Return ONLY a raw JSON object with the parameters above.`;
+
+    try {
+        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+            model: "gpt-4o",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `Certificate layout metrics:\n${JSON.stringify(metrics, null, 2)}` }
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.1
+        }, {
+            headers: {
+                'Authorization': `Bearer ${cleanKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        const content = response.data.choices[0].message.content;
+        return JSON.parse(content);
+    } catch (err) {
+        const errorDetail = err.response?.data?.error?.message || err.message;
+        console.error('AI Layout Error:', err.response?.data || err.message);
+        throw new Error(`AI Layout Error: ${errorDetail}`);
+    }
+}
+
 async function fetchLeadList() {
     try { fs.writeFileSync('C:\\oscar_debug.txt', 'fetchLeadList started at ' + new Date().toISOString()); } catch (e) { }
     console.log('Starting fetchLeadList...');
@@ -2024,6 +2190,10 @@ async function fetchLeadList() {
                 return undefined;
             };
 
+            if (item.id === itemsResponse.data.value[0]?.id) {
+                console.log('[SP DEBUG] Sample field keys:', Object.keys(fields).join(', '));
+            }
+
             return {
                 ...fields,
                 id: item.id,
@@ -2034,7 +2204,8 @@ async function fetchLeadList() {
                 PONumber: getField(['PONumber', 'PONum', 'PO_x0020_Number', 'PurchaseOrder']),
                 JobNum: getField(['JobNumber', 'Job_x0023_', 'Job Num']),
                 ProjType: getField(['ProjType', 'Project Type', 'Type']),
-                Status: getField(['Status', 'LeadStatus', 'JobStatus', 'Job_x0020_Status'])
+                Status: getField(['Status', 'LeadStatus', 'JobStatus', 'Job_x0020_Status']),
+                ShipToAddress: getField(['ShipToAddress', 'Ship To Address', 'Ship_x0020_To_x0020_Address', 'ShipTo', 'ShippingAddress', 'Shipping Address', 'JobLocation', 'Job Location', 'Location'])
             };
         });
 
@@ -2469,6 +2640,8 @@ app.whenReady().then(() => {
         return { success: true };
     });
     ipcMain.handle('ai:determineStandard', determineStandard);
+    ipcMain.handle('ai:generateCertTemplate', generateCertTemplate);
+    ipcMain.handle('ai:optimizeCertLayout', optimizeCertLayout);
     ipcMain.handle('t24:getStatus', () => deviceStatus);
 
     // --- Geotab Logic ---

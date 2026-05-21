@@ -687,6 +687,8 @@ body {
   border: 1.5px solid #000;
   padding: 4px;
   margin-bottom: 8px;
+  overflow: hidden;
+  position: relative;
 }
 
 .cert-chart-header {
@@ -702,6 +704,8 @@ body {
 .cert-chart-container {
   height: 160px;
   width: 100%;
+  overflow: hidden;
+  position: relative;
 }
 
 .cert-footer-grid {
@@ -825,6 +829,12 @@ body {
   .cert-main-page {
     min-height: 275mm !important;
     break-after: page;
+  }
+
+  .cert-page-2 {
+    min-height: 275mm !important;
+    display: flex !important;
+    flex-direction: column !important;
   }
 
   .cert-header,
