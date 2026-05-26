@@ -1974,6 +1974,10 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <input name="projectRef" value={formData.projectRef} onChange={handleInput} />
                         </div>
                         <div className="form-group" style={{ flex: 1 }}>
+                            <label>Test Date</label>
+                            <input type="date" name="testDate" value={formData.testDate} onChange={handleInput} />
+                        </div>
+                        <div className="form-group" style={{ flex: 1 }}>
                             <label>Cert No.</label>
                             <div style={{ display: 'flex', gap: '6px' }}>
                                 <input name="certNo" value={formData.certNo} onChange={handleInput} style={{ flex: 1 }} />
