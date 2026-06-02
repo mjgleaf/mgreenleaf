@@ -337,6 +337,15 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const [aiLayoutOverrides, setAiLayoutOverrides] = useState(null);
     const [aiLayoutLoading, setAiLayoutLoading] = useState(false);
 
+    // Email Certificate dialog
+    const [showEmailDialog, setShowEmailDialog] = useState(false);
+    const [emailTo, setEmailTo] = useState('');
+    const [emailCc, setEmailCc] = useState('');
+    const [emailSubject, setEmailSubject] = useState('');
+    const [emailBody, setEmailBody] = useState('');
+    const [emailSending, setEmailSending] = useState(false);
+    const [emailStatus, setEmailStatus] = useState(null); // { type: 'success'|'error', message }
+
     // --- Drag-and-Drop Section Reordering ---
     const dragItem = useRef(null);
     const dragOverItem = useRef(null);
@@ -503,6 +512,22 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     const serials = current.instruments?.map(inst => inst.serialNo).filter(Boolean).flatMap(s => s.split(/[, \s]+/)) || [];
                     const updatedTests = [...current.tests];
 
+                    // Duration of the marked Static Hold window (in MINUTES, to match the testDuration field).
+                    // Uses the first complete static start->end marker pair recorded during live capture.
+                    const staticHoldDuration = (markers) => {
+                        if (!Array.isArray(markers) || markers.length === 0) return null;
+                        let start = null;
+                        for (const m of markers) {
+                            if (m.phase !== 'static') continue;
+                            if (m.edge === 'start') start = m;
+                            else if (m.edge === 'end' && start) {
+                                const mins = (m.elapsedMs - start.elapsedMs) / 60000;
+                                return mins > 0 ? mins : null;
+                            }
+                        }
+                        return null;
+                    };
+
                     dataSets.forEach((ds, idx) => {
                         if (!ds.data || ds.data.length === 0 || idx >= updatedTests.length) return;
                         const stats = processChartData(ds.data, serials);
@@ -520,7 +545,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             updatedTests[idx].localTime = stats.peakTime;
                         }
                         if (updatedTests[idx].testDuration === null || updatedTests[idx].testDuration === '') {
-                            updatedTests[idx].testDuration = stats.totalTime.toFixed(0);
+                            const holdMins = staticHoldDuration(ds.markers);
+                            updatedTests[idx].testDuration = holdMins !== null ? holdMins.toFixed(0) : stats.totalTime.toFixed(0);
                         }
                     });
 
@@ -544,6 +570,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             const testPPCount = updatedSBTests[tIdx].numPickPoints ?? globalPP;
                             const newPPData = [...updatedSBTests[tIdx].pickPointData];
                             let firstStats = null;
+                            let firstMarkers = null;
 
                             for (let ppIdx = 0; ppIdx < testPPCount && dsIdx < dataSets.length; ppIdx++, dsIdx++) {
                                 const ds = dataSets[dsIdx];
@@ -554,7 +581,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 if (!newPPData[ppIdx]?.measuredForce) {
                                     newPPData[ppIdx] = { ...newPPData[ppIdx], measuredForce: stats.maxWeight.toFixed(0) };
                                 }
-                                if (!firstStats) firstStats = stats;
+                                if (!firstStats) { firstStats = stats; firstMarkers = ds.markers; }
                             }
 
                             updatedSBTests[tIdx] = { ...updatedSBTests[tIdx], pickPointData: newPPData };
@@ -564,7 +591,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     updatedSBTests[tIdx] = { ...updatedSBTests[tIdx], localTime: firstStats.peakTime };
                                 }
                                 if (!updatedSBTests[tIdx].testDuration) {
-                                    updatedSBTests[tIdx] = { ...updatedSBTests[tIdx], testDuration: firstStats.totalTime.toFixed(0) };
+                                    const holdMins = staticHoldDuration(firstMarkers);
+                                    updatedSBTests[tIdx] = { ...updatedSBTests[tIdx], testDuration: holdMins !== null ? holdMins.toFixed(0) : firstStats.totalTime.toFixed(0) };
                                 }
                             }
                         }
@@ -963,13 +991,21 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             );
             if (result.certLayout) setCertLayout(result.certLayout);
             setFormData(prev => {
-                const merged = {
-                    ...prev,
-                    ...result.formData,
-                    photos: prev.photos || [],
-                    graphPageBreaks: prev.graphPageBreaks || {},
-                    sectionOrder: prev.sectionOrder
-                };
+                // Non-destructive merge: only apply AI values that are actually
+                // populated, so blank fields the AI returns for things it doesn't
+                // know never wipe existing certificate data.
+                const merged = { ...prev };
+                if (result.formData) {
+                    for (const [key, val] of Object.entries(result.formData)) {
+                        if (val === undefined || val === null) continue;
+                        if (typeof val === 'string' && val.trim() === '') continue;
+                        if (Array.isArray(val) && val.length === 0) continue;
+                        merged[key] = val;
+                    }
+                }
+                merged.photos = prev.photos || [];
+                merged.graphPageBreaks = prev.graphPageBreaks || {};
+                merged.sectionOrder = prev.sectionOrder;
                 if (onUpdateMetadata && jobId) {
                     onUpdateMetadata(jobId, { certData: merged });
                 }
@@ -1050,6 +1086,91 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (onPreviewModeChange) onPreviewModeChange(true);
     };
 
+    // Pull the customer's contact email from the SharePoint job. Prefer the mapped
+    // ContactEmail field; fall back to scanning every field for an email-looking value
+    // so older cached jobs (saved before the mapping existed) still resolve.
+    const resolveContactEmail = (spJob) => {
+        if (!spJob) return '';
+        if (spJob.ContactEmail && String(spJob.ContactEmail).trim()) return String(spJob.ContactEmail).trim();
+        const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        for (const v of Object.values(spJob)) {
+            const candidate = (v && typeof v === 'object' && v.Value) ? v.Value : v;
+            if (typeof candidate === 'string' && emailRe.test(candidate.trim())) return candidate.trim();
+        }
+        return '';
+    };
+
+    const openEmailDialog = async () => {
+        // Persist the latest edits so the rendered PDF matches what's on screen.
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: formData });
+
+        let spJob = selectedJob;
+        if ((!spJob || !resolveContactEmail(spJob)) && job?.metadata?.jobNumber) {
+            try {
+                const cached = await getElectronAPI().getJobsCache();
+                const jobs = cached?.jobs || (Array.isArray(cached) ? cached : []);
+                const found = jobs.find(j => j.QuoteNum === job.metadata.jobNumber);
+                if (found) spJob = found;
+            } catch (_) { /* offline or no cache */ }
+        }
+
+        const to = resolveContactEmail(spJob);
+        const contactName = (spJob?.ContactName && String(spJob.ContactName).trim())
+            || formData.buyer || formData.soldTo || spJob?.Customer || 'Customer';
+        const certNo = formData.certNo || 'Draft';
+
+        setEmailTo(to);
+        setEmailCc('sales@hydrowates.com');
+        setEmailSubject(`Load Test Certificate ${certNo}${formData.projectRef ? ` — ${formData.projectRef}` : ''}`);
+        setEmailBody(
+            `Hello ${contactName},\n\n` +
+            `Please find attached load test certificate ${certNo} for your records.\n\n` +
+            `Kind regards,\nHydro-Wates`
+        );
+        setEmailStatus(to ? null : { type: 'error', message: 'No contact email was found on the Leads List for this job — please enter one.' });
+        setShowEmailDialog(true);
+    };
+
+    const handleSendEmail = async () => {
+        if (!emailTo || !emailTo.trim()) {
+            setEmailStatus({ type: 'error', message: 'Please enter a recipient email address.' });
+            return;
+        }
+        setEmailSending(true);
+        setEmailStatus(null);
+        try {
+            const result = await getElectronAPI().sendCertificateEmail({
+                to: emailTo,
+                cc: emailCc,
+                subject: emailSubject,
+                body: emailBody,
+                fileName: `Certificate_${formData.certNo || 'Draft'}`
+            });
+            if (result?.success) {
+                setEmailStatus({ type: 'success', message: 'Certificate emailed successfully.' });
+                if (formData.certNo && getElectronAPI().certRegister) {
+                    try {
+                        await getElectronAPI().certRegister({
+                            certNo: formData.certNo,
+                            jobName: selectedJob?.JobName || '',
+                            customer: formData.soldTo,
+                            testDate: formData.testDate,
+                            template: certLayout,
+                            result: formData.testResults
+                        });
+                    } catch (_) { /* registry is best-effort */ }
+                }
+                setTimeout(() => setShowEmailDialog(false), 1300);
+            } else {
+                setEmailStatus({ type: 'error', message: result?.error || 'Failed to send the email.' });
+            }
+        } catch (err) {
+            setEmailStatus({ type: 'error', message: err.message || 'Failed to send the email.' });
+        } finally {
+            setEmailSending(false);
+        }
+    };
+
     if (isPreview) {
         return (
             <div className="preview-mode">
@@ -1067,6 +1188,9 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         <button onClick={finalizePDF} className="action-btn" style={{ background: '#1a3a6c' }}>
                             💾 Finalize & Save PDF
                         </button>
+                        <button onClick={openEmailDialog} className="action-btn" style={{ background: '#0e7c4a' }}>
+                            ✉️ Email Certificate
+                        </button>
                     </div>
                 </div>
 
@@ -1079,6 +1203,50 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         }}
                         onClose={() => setShowSignaturePad(false)}
                     />
+                )}
+
+                {/* Email Certificate Modal (no-print so it is excluded from the rendered PDF) */}
+                {showEmailDialog && (
+                    <div className="no-print" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <div style={{ background: '#fff', borderRadius: '8px', width: '560px', maxWidth: '92vw', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 10px 40px rgba(0,0,0,0.3)' }}>
+                            <div style={{ background: '#0e7c4a', color: '#fff', padding: '14px 20px', borderRadius: '8px 8px 0 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <strong style={{ fontSize: '16px' }}>✉️ Email Certificate</strong>
+                                <button onClick={() => setShowEmailDialog(false)} disabled={emailSending} style={{ background: 'transparent', border: 'none', color: '#fff', fontSize: '20px', cursor: 'pointer', lineHeight: 1 }}>×</button>
+                            </div>
+                            <div style={{ padding: '20px' }}>
+                                <div className="form-group" style={{ marginBottom: '12px' }}>
+                                    <label style={{ fontWeight: 600 }}>To</label>
+                                    <input type="email" value={emailTo} onChange={(e) => setEmailTo(e.target.value)} placeholder="customer@example.com" style={{ width: '100%' }} />
+                                </div>
+                                <div className="form-group" style={{ marginBottom: '12px' }}>
+                                    <label style={{ fontWeight: 600 }}>Cc <span style={{ fontWeight: 400, color: '#888' }}>(optional)</span></label>
+                                    <input type="text" value={emailCc} onChange={(e) => setEmailCc(e.target.value)} placeholder="separate multiple with commas" style={{ width: '100%' }} />
+                                </div>
+                                <div className="form-group" style={{ marginBottom: '12px' }}>
+                                    <label style={{ fontWeight: 600 }}>Subject</label>
+                                    <input type="text" value={emailSubject} onChange={(e) => setEmailSubject(e.target.value)} style={{ width: '100%' }} />
+                                </div>
+                                <div className="form-group" style={{ marginBottom: '12px' }}>
+                                    <label style={{ fontWeight: 600 }}>Message</label>
+                                    <textarea value={emailBody} onChange={(e) => setEmailBody(e.target.value)} rows={7} style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }} />
+                                </div>
+                                <div style={{ fontSize: '13px', color: '#555', background: '#f1f5f9', borderRadius: '6px', padding: '8px 12px', marginBottom: '14px' }}>
+                                    📎 The current certificate preview will be attached as <strong>Certificate_{formData.certNo || 'Draft'}.pdf</strong> and sent from your signed-in Microsoft account.
+                                </div>
+                                {emailStatus && (
+                                    <div style={{ fontSize: '13px', padding: '8px 12px', borderRadius: '6px', marginBottom: '14px', background: emailStatus.type === 'success' ? '#dcfce7' : '#fee2e2', color: emailStatus.type === 'success' ? '#166534' : '#991b1b' }}>
+                                        {emailStatus.type === 'success' ? '✓ ' : '⚠ '}{emailStatus.message}
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                                    <button onClick={() => setShowEmailDialog(false)} disabled={emailSending} className="action-btn secondary">Cancel</button>
+                                    <button onClick={handleSendEmail} disabled={emailSending} className="action-btn" style={{ background: '#0e7c4a' }}>
+                                        {emailSending ? 'Sending…' : '✉️ Send Email'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 )}
                 <div className="certificate-paper" style={{ paddingLeft: '44px' }}>
                     {(() => {
@@ -2922,6 +3090,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     fontFamily: 'inherit'
                                 }}
                                 disabled={aiLoading}
+                                autoFocus
                             />
                             {aiError && (
                                 <p style={{ color: '#ff6b6b', fontSize: '0.85rem', marginTop: '8px' }}>{aiError}</p>

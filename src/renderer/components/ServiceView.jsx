@@ -76,6 +76,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [cellCount, setCellCount] = useState(1);
     const [isLogging, setIsLogging] = useState(false);
     const [loggedData, setLoggedData] = useState([]);
+    const [markers, setMarkers] = useState([]); // test-phase markers for the active recording
     const [logInterval, setLogInterval] = useState(0); // ms
     const [keepAwake, setKeepAwake] = useState(false);
     const [previewData, setPreviewData] = useState([]); // Rolling buffer for preview
@@ -189,7 +190,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                     setAllJobs(migrated);
                     setActiveJobId(migrated[0].id);
                 }
-                setActiveTab('report');
+                // Stay on the default 'welcome' (Dashboard & Jobs) tab after
+                // loading saved data -- don't jump to the reports tab.
             }
         };
         load();
@@ -263,14 +265,18 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         }
     }, [selectedTags, cellCount, deviceStatus]);
 
-    // Sync session state to companion server (mobile PWA)
+    // Sync session state to companion server (mobile PWA).
+    // companionRunning is in the deps so the current state (tags/cells/logging)
+    // is re-pushed the moment the server starts -- otherwise a server started
+    // AFTER cells were configured would keep empty selectedTags and the phone
+    // would show no weight.
     useEffect(() => {
         getElectronAPI().companionUpdateState({
             selectedTags,
             cellCount,
             isLogging
         });
-    }, [selectedTags, cellCount, isLogging]);
+    }, [selectedTags, cellCount, isLogging, companionRunning]);
 
     // Push equipment + certificates for the selected SharePoint job to the companion.
     useEffect(() => {
@@ -293,7 +299,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             }
         })();
         return () => { cancelled = true; };
-    }, [selectedSharePointJob]);
+    }, [selectedSharePointJob, companionRunning]);
 
     const handleRecover = async () => {
         if (getElectronAPI().loadRecovery) {
@@ -326,6 +332,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     }, [allJobs, activeJobId]);
 
     const handleDataImported = (data, jobNumber, extraMetadata = {}) => {
+        // Markers belong to this specific recording (dataSet), not the whole job.
+        const { markers: importMarkers, ...restMetadata } = extraMetadata;
         // Check if we should append to an existing job
         const existingJobIndex = allJobs.findIndex(j => j.metadata?.jobNumber === jobNumber);
 
@@ -352,15 +360,16 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
             const newDataSet = {
                 data: data,
-                name: extraMetadata.fileName || `Data Set ${existingDataSets.length + 1}`,
+                name: restMetadata.fileName || `Data Set ${existingDataSets.length + 1}`,
                 inputTimeUnit: detectedTimeUnit,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                ...(importMarkers && importMarkers.length ? { markers: importMarkers } : {})
             };
 
             const updatedJob = {
                 ...existingJob,
                 dataSets: [...existingDataSets, newDataSet],
-                metadata: { ...existingJob.metadata, ...extraMetadata }
+                metadata: { ...existingJob.metadata, ...restMetadata }
             };
             // Clean up legacy single data field
             delete updatedJob.data;
@@ -374,11 +383,12 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                 id: Date.now(),
                 dataSets: [{
                     data: data,
-                    name: extraMetadata.fileName || 'Data Set 1',
+                    name: restMetadata.fileName || 'Data Set 1',
                     inputTimeUnit: detectedTimeUnit,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    ...(importMarkers && importMarkers.length ? { markers: importMarkers } : {})
                 }],
-                metadata: { jobNumber, ...extraMetadata }
+                metadata: { jobNumber, ...restMetadata }
             };
             updatedJobs = [newJob, ...allJobs];
             finalJobId = newJob.id;
@@ -504,6 +514,44 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         }, 'dashboard-data.json');
     };
 
+    // Selecting a SharePoint job immediately makes it a persistent, autosaving
+    // local job so the certificate auto-fills and edits/uploads attach to it
+    // without ever prompting for a job number.
+    const selectJob = (spJob) => {
+        if (!spJob) return;
+        setSelectedSharePointJob(spJob);
+
+        const existing = allJobs.find(j => j.metadata?.jobNumber === spJob.QuoteNum);
+        let targetId;
+        if (existing) {
+            targetId = existing.id;
+        } else {
+            const newJob = {
+                id: Date.now(),
+                dataSets: [],
+                metadata: {
+                    jobNumber: spJob.QuoteNum,
+                    customer: spJob.Customer,
+                    leadCompany: spJob.LeadCompany,
+                    poDate: spJob.PODate,
+                    poNumber: spJob.PONumber
+                }
+            };
+            targetId = newJob.id;
+            setAllJobs(prev => prev.some(j => j.metadata?.jobNumber === spJob.QuoteNum) ? prev : [newJob, ...prev]);
+        }
+
+        setActiveJobId(targetId);
+        setImportContext({
+            QuoteNum: spJob.QuoteNum,
+            Customer: spJob.Customer,
+            LeadCompany: spJob.LeadCompany,
+            PODate: spJob.PODate,
+            PONumber: spJob.PONumber
+        });
+        setActiveTab('cert');
+    };
+
     const triggerAppendData = (job) => {
         if (!job) return;
         setImportContext({
@@ -599,7 +647,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         <button className="nav-btn home-btn" onClick={onGoHome}>🏠 Back to Main Menu</button>
                         <button className={`nav-btn ${activeTab === 'welcome' ? 'active' : ''}`} onClick={() => { setActiveTab('welcome'); setImportContext(null); }}>Dashboard & Jobs</button>
                         <button className={`nav-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => setActiveTab('live')}>Live Data</button>
-                        <button className={`nav-btn ${activeTab === 'import' ? 'active' : ''}`} onClick={() => { setActiveTab('import'); setImportContext(null); }}>Import CSV</button>
+                        <button className={`nav-btn ${activeTab === 'import' ? 'active' : ''}`} onClick={() => { if (activeJob) { triggerAppendData(activeJob); } else { setActiveTab('import'); setImportContext(null); } }}>Import CSV</button>
                         <button className={`nav-btn ${activeTab === 'report' ? 'active' : ''}`} onClick={() => setActiveTab('report')}>Saved Projects / Reports</button>
                         <button className={`nav-btn ${activeTab === 'cert' ? 'active' : ''}`} onClick={() => setActiveTab('cert')}>Certificate</button>
                         <button className={`nav-btn ${activeTab === 'leaks' ? 'active' : ''}`} onClick={() => setActiveTab('leaks')}>Leak Logs{companionLeaks.length > 0 ? ` (${companionLeaks.length})` : ''}</button>
@@ -613,12 +661,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                 <div className="content-area" style={isCertPreview ? { padding: 0, margin: 0, overflowY: 'auto' } : {}}>
                     {activeTab === 'welcome' && (
                         <WelcomeView
-                            onJobSelected={(job) => {
-                                setSelectedSharePointJob(job);
-                                const existingJob = allJobs.find(j => j.metadata?.jobNumber === job.QuoteNum);
-                                setActiveJobId(existingJob ? existingJob.id : null);
-                                setActiveTab('cert');
-                            }}
+                            onJobSelected={(job) => selectJob(job)}
                             onOpenSettings={() => setActiveTab('settings')}
                             onCompanySelected={(company) => {
                                 setViewingCompany(company);
@@ -630,12 +673,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                         <CompanyInfoView
                             company={viewingCompany}
                             onBack={() => setActiveTab('welcome')}
-                            onSelectForLive={(job) => {
-                                setSelectedSharePointJob(job);
-                                const existingJob = allJobs.find(j => j.metadata?.jobNumber === job.QuoteNum);
-                                setActiveJobId(existingJob ? existingJob.id : null);
-                                setActiveTab('cert');
-                            }}
+                            onSelectForLive={(job) => selectJob(job)}
                             onImportCsv={(job) => {
                                 setImportContext(job);
                                 setActiveTab('import');
@@ -663,6 +701,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 setIsLogging={setIsLogging}
                                 loggedData={loggedData}
                                 setLoggedData={setLoggedData}
+                                markers={markers}
+                                setMarkers={setMarkers}
                                 logInterval={logInterval}
                                 setLogInterval={setLogInterval}
                                 keepAwake={keepAwake}

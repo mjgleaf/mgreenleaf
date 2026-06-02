@@ -15,7 +15,7 @@ import {
 const colors = ['#3fb950', '#2188ff', '#f85149', '#dbab09', '#8957e5', '#f0883e', '#1f6feb', '#238636', '#fa4549', '#e3b341'];
 const MAX_CHART_POINTS = 500;
 
-function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChange }) {
+function LiveGraph({ data, markers = [], activeTags, companyName, jobNumber, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChange }) {
     const [viewMode, setViewMode] = useState('auto');
     const [fixedDuration, setFixedDuration] = useState(120);
     const [yZoom, setYZoom] = useState([0, 'auto']);
@@ -85,6 +85,9 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
         }
         return downsampled;
     }, [data, displayUnit, xUnit]);
+
+    // Convert marker elapsed times (ms) into the chart's x-axis units (min/hour).
+    const markerTimeFactor = xUnit === 'hour' ? 1 / 3600000 : 1 / 60000;
 
     return (
         <div className="live-graph-container" style={{ background: 'linear-gradient(145deg, var(--bg-card), rgba(15, 25, 35, 0.5))', padding: '20px', borderRadius: 'var(--radius-lg, 14px)', border: '1px solid rgba(255,255,255,0.04)', marginTop: '20px', boxShadow: '0 4px 16px rgba(0,0,0,0.2)' }}>
@@ -187,6 +190,21 @@ function LiveGraph({ data, activeTags, companyName, jobNumber, displayUnit = 'lb
                                 label={{ value: 'WLL', position: 'right', fill: '#ff4444', fontSize: 10 }}
                             />
                         )}
+
+                        {markers.map((m, i) => {
+                            const color = m.phase === 'function' ? '#0ea5e9' : '#8b5cf6';
+                            const shortLabel = `${m.phase === 'function' ? 'Func' : 'Hold'} ${m.edge === 'start' ? '▶' : '⏹'}`;
+                            return (
+                                <ReferenceLine
+                                    key={`marker-${i}`}
+                                    x={m.elapsedMs * markerTimeFactor}
+                                    stroke={color}
+                                    strokeDasharray={m.edge === 'start' ? '0' : '5 4'}
+                                    strokeWidth={1.5}
+                                    label={{ value: shortLabel, position: 'top', fill: color, fontSize: 10 }}
+                                />
+                            );
+                        })}
 
                         {activeTags.map((tag, i) => {
                             if (!tag) return null;

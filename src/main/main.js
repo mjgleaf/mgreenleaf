@@ -96,6 +96,24 @@ class T24Reader {
     }
 
     autoDetectTag(tagHex, samples) {
+        // Endianness and unit (tonnes vs raw) are properties of the T24 dongle's
+        // firmware and are shared by EVERY tag it reports. If we already know other
+        // tags, a newly-seen tag uses the SAME format -- inherit it rather than
+        // guessing from sample magnitude. The magnitude-based guess below can lock
+        // onto the wrong endianness, which scrambles the float bytes and produces
+        // erratic, wildly-swinging readings (the tag-2075 LE mis-detection bug).
+        const consensus = this.getKnownFormatConsensus(tagHex);
+        if (consensus) {
+            const config = {};
+            if (consensus.skipTonnesConversion) config.skipTonnesConversion = true;
+            if (consensus.useFloatLE) config.useFloatLE = true;
+            console.log(`[AUTO-DETECT] Tag ${tagHex}: inheriting ${consensus.label} from known tags`);
+            this.calibrationConfig[tagHex] = { ...config, ...(this.calibrationConfig[tagHex] || {}) };
+            this.saveCalibration();
+            return;
+        }
+
+        // No known tags to learn from -- fall back to guessing the format.
         // Try all 4 combinations: BE/LE x raw/tonnes-converted
         // Pick the one where values are most reasonable for a load cell reading in lbs
         const combos = [
@@ -161,12 +179,39 @@ class T24Reader {
         this.saveCalibration();
     }
 
+    // Returns the float format ({useFloatLE, skipTonnesConversion}) shared by all
+    // already-known tags, or null if there are none or they disagree. New tags
+    // inherit this so they match the dongle's actual byte order/unit instead of
+    // independently guessing (which can pick the wrong endianness).
+    getKnownFormatConsensus(excludeTag) {
+        const formats = [];
+        for (const [tag, cfg] of Object.entries(this.calibrationConfig)) {
+            if (tag === excludeTag || !cfg || typeof cfg !== 'object') continue;
+            formats.push({
+                useFloatLE: !!cfg.useFloatLE,
+                skipTonnesConversion: !!cfg.skipTonnesConversion
+            });
+        }
+        if (formats.length === 0) return null;
+        const first = formats[0];
+        const allAgree = formats.every(f =>
+            f.useFloatLE === first.useFloatLE &&
+            f.skipTonnesConversion === first.skipTonnesConversion
+        );
+        if (!allAgree) return null;
+        return {
+            useFloatLE: first.useFloatLE,
+            skipTonnesConversion: first.skipTonnesConversion,
+            label: `${first.useFloatLE ? 'LE' : 'BE'}+${first.skipTonnesConversion ? 'raw' : 'tonnes'}`
+        };
+    }
+
     saveCalibration() {
         try {
-            const userDataPath = path.join(app.getPath('userData'), 'calibration.json');
-            const projectRoot = path.resolve(__dirname, '../../');
-            const devPath = path.join(projectRoot, 'config/calibration.json');
-            const savePath = app.isPackaged ? userDataPath : devPath;
+            // Always save to userData. loadCalibration() reads userData FIRST, so
+            // saving anywhere else (e.g. the dev config/ folder) means auto-detected
+            // calibrations would never be read back on the next launch.
+            const savePath = path.join(app.getPath('userData'), 'calibration.json');
             fs.writeFileSync(savePath, JSON.stringify(this.calibrationConfig, null, 4));
             console.log(`[CALIBRATION] Saved config to ${savePath}`);
         } catch (err) {
@@ -771,6 +816,72 @@ async function handleSavePDF(event, title) {
         }
     }
     return { success: false, canceled: true };
+}
+
+// Render the currently-previewed certificate to PDF and email it via the signed-in
+// Microsoft account (Graph /me/sendMail). The renderer must be in Preview mode when
+// this is called; the email dialog itself is marked .no-print so it is excluded.
+async function handleEmailCertificate(event, opts) {
+    const { to, cc, subject, body, fileName } = opts || {};
+    if (!to || !to.trim()) {
+        return { success: false, error: 'No recipient email address was provided.' };
+    }
+    if (!mainWindow) {
+        return { success: false, error: 'Application window is not available.' };
+    }
+
+    try {
+        const pdfData = await mainWindow.webContents.printToPDF({
+            marginsType: 0,
+            pageSize: 'A4',
+            printBackground: true,
+            printSelectionOnly: false,
+            landscape: false,
+            preferCSSPageSize: true,
+            scaleFactor: 100
+        });
+
+        const safeName = (fileName || 'Certificate').replace(/[^a-zA-Z0-9_\- ]+/g, '_').trim() || 'Certificate';
+        const toRecipients = to.split(/[;,]+/).map(s => s.trim()).filter(Boolean)
+            .map(addr => ({ emailAddress: { address: addr } }));
+        const ccRecipients = (cc || '').split(/[;,]+/).map(s => s.trim()).filter(Boolean)
+            .map(addr => ({ emailAddress: { address: addr } }));
+
+        if (toRecipients.length === 0) {
+            return { success: false, error: 'No valid recipient email address was provided.' };
+        }
+
+        const message = {
+            subject: subject || 'Load Test Certificate',
+            body: { contentType: 'HTML', content: (body || '').replace(/\n/g, '<br>') },
+            toRecipients,
+            ...(ccRecipients.length ? { ccRecipients } : {}),
+            attachments: [{
+                '@odata.type': '#microsoft.graph.fileAttachment',
+                name: `${safeName}.pdf`,
+                contentType: 'application/pdf',
+                contentBytes: Buffer.from(pdfData).toString('base64')
+            }]
+        };
+
+        const token = await getAccessToken(['Mail.Send']);
+        const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, saveToSentItems: true })
+        });
+
+        if (!resp.ok) {
+            const errText = await resp.text();
+            console.error('Certificate email Graph error:', resp.status, errText.slice(0, 300));
+            return { success: false, error: `Email service error ${resp.status}: ${errText.slice(0, 200)}` };
+        }
+
+        return { success: true };
+    } catch (error) {
+        console.error('Failed to email certificate:', error);
+        return { success: false, error: error.message };
+    }
 }
 
 async function handleSaveCSV(event, data, defaultName) {
@@ -1961,7 +2072,7 @@ LAYOUTS:
 COMMON FORM FIELDS (include in every response):
 soldTo, facilityLocation, buyer, projectRef, customerPO (leave "" if unknown),
 testDate (leave "" to use today's date),
-procedureSummary (write a detailed multi-sentence procedure summary),
+procedureSummary (write a detailed multi-sentence procedure summary describing ONLY the loading procedure performed and the measurements recorded — never claim the test ensures, guarantees, or verifies the equipment's operational safety, reliability, integrity, or fitness for service),
 referenceStandards (applicable codes like "ASME B30.2, OSHA 1910.179"),
 instruments: [{ instrument: string, capacity: string, serialNo: "", dataLink: string, accuracy: string }],
 numTests: number,
@@ -1974,6 +2085,7 @@ RULES:
 - Create the exact number of test records described. If the user doesn't specify, infer from context.
 - Fill every field you can infer. Leave unknown fields as empty strings "".
 - Write detailed description fields for each test step.
+- SCOPE / LIABILITY: Our scope is limited to applying the specified test load and recording the measured results. Never write language stating or implying that the test, the certificate, or our company ensures, guarantees, certifies, or is responsible for the crane's (or any equipment's) operational safety, reliability, structural integrity, or fitness for continued service. This applies to procedureSummary and every description / itemDescription field. State only what was done — loads applied and forces/measurements recorded.
 - Use realistic overload percentages per industry norms (e.g. 125% proof load, 150% for ASME B30.2 cranes).
 - Return ONLY a raw JSON object with keys: "certLayout" (string), "formData" (object), and "summary" (a short 1-2 sentence description of what you generated or changed).
 - When modifying an existing certificate, return the COMPLETE updated formData — not just the changed fields. Preserve all existing data unless the user asks to change it.`;
@@ -2194,6 +2306,24 @@ async function fetchLeadList() {
                 console.log('[SP DEBUG] Sample field keys:', Object.keys(fields).join(', '));
             }
 
+            // Resolve customer contact email. Try the known column names first, then fall
+            // back to scanning every field value for the first email-looking string so we
+            // still find it even if the Leads List column has an unexpected internal name.
+            let contactEmail = getField([
+                'ContactEmail', 'Contact Email', 'Contact_x0020_Email', 'CustomerEmail', 'Customer Email',
+                'Email', 'EmailAddress', 'Email Address', 'Email_x0020_Address', 'ContactEmailAddress'
+            ]);
+            if (!contactEmail) {
+                const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                for (const v of Object.values(fields)) {
+                    const candidate = (v && typeof v === 'object' && v.Value) ? v.Value : v;
+                    if (typeof candidate === 'string' && emailRe.test(candidate.trim())) {
+                        contactEmail = candidate.trim();
+                        break;
+                    }
+                }
+            }
+
             return {
                 ...fields,
                 id: item.id,
@@ -2205,7 +2335,9 @@ async function fetchLeadList() {
                 JobNum: getField(['JobNumber', 'Job_x0023_', 'Job Num']),
                 ProjType: getField(['ProjType', 'Project Type', 'Type']),
                 Status: getField(['Status', 'LeadStatus', 'JobStatus', 'Job_x0020_Status']),
-                ShipToAddress: getField(['ShipToAddress', 'Ship To Address', 'Ship_x0020_To_x0020_Address', 'ShipTo', 'ShippingAddress', 'Shipping Address', 'JobLocation', 'Job Location', 'Location'])
+                ShipToAddress: getField(['ShipToAddress', 'Ship To Address', 'Ship_x0020_To_x0020_Address', 'ShipTo', 'ShippingAddress', 'Shipping Address', 'JobLocation', 'Job Location', 'Location']),
+                ContactEmail: contactEmail || '',
+                ContactName: getField(['ContactName', 'Contact Name', 'Contact_x0020_Name', 'Contact', 'CustomerContact', 'Customer Contact', 'AttentionTo', 'Attn']) || ''
             };
         });
 
@@ -2625,6 +2757,7 @@ app.whenReady().then(() => {
     });
 
     ipcMain.handle('storage:savePDF', handleSavePDF);
+    ipcMain.handle('email:sendCertificate', handleEmailCertificate);
     ipcMain.handle('storage:saveCSV', handleSaveCSV);
 
     // Settings & SharePoint

@@ -17,6 +17,8 @@ function LiveView({
     setIsLogging,
     loggedData,
     setLoggedData,
+    markers,
+    setMarkers,
     logInterval,
     setLogInterval,
     keepAwake,
@@ -144,6 +146,7 @@ function LiveView({
             return;
         }
         setLoggedData([]);
+        setMarkers([]);
         setIsLogging(true);
         setError('');
         // Reset peak hold
@@ -179,7 +182,8 @@ function LiveView({
                 customer: selectedJob.Customer,
                 leadCompany: selectedJob.LeadCompany,
                 poDate: selectedJob.PODate,
-                poNumber: selectedJob.PONumber
+                poNumber: selectedJob.PONumber,
+                markers
             };
             onSaveLog(loggedData, selectedJob.QuoteNum, metadata);
 
@@ -188,6 +192,7 @@ function LiveView({
             }
 
             setLoggedData([]);
+            setMarkers([]);
         } else {
             setShowJobPrompt(true);
         }
@@ -209,6 +214,35 @@ function LiveView({
         });
     }, [selectedJob, jobInput]);
 
+    // ── Test-phase markers (function test / static hold) ──
+    const formatElapsed = (ms) => {
+        const totalSec = Math.max(0, Math.round(ms / 1000));
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        return `${m}:${s.toString().padStart(2, '0')}`;
+    };
+
+    const isPhaseOpen = (phase) => {
+        const ph = markers.filter(m => m.phase === phase);
+        return ph.length > 0 && ph[ph.length - 1].edge === 'start';
+    };
+
+    const toggleMarker = (phase, phaseLabel) => {
+        const firstTimestamp = loggedData.length > 0 ? loggedData[0].timestamp : Date.now();
+        const edge = isPhaseOpen(phase) ? 'end' : 'start';
+        setMarkers(prev => [...prev, {
+            phase,
+            edge,
+            label: `${phaseLabel} ${edge === 'start' ? 'Start' : 'End'}`,
+            elapsedMs: Date.now() - firstTimestamp,
+            timestamp: Date.now()
+        }]);
+    };
+
+    const undoLastMarker = () => {
+        setMarkers(prev => prev.slice(0, -1));
+    };
+
     const handleSave = async () => {
         const regex = /^HWI-\d{2}-\d{3}$/i;
         if (!regex.test(jobInput)) {
@@ -217,7 +251,7 @@ function LiveView({
         }
 
         const upperJob = jobInput.toUpperCase();
-        onSaveLog(loggedData, upperJob);
+        onSaveLog(loggedData, upperJob, { markers });
 
         if (loggedData.length > 0) {
             await getElectronAPI().saveCSV(loggedData, upperJob);
@@ -227,6 +261,7 @@ function LiveView({
         setJobInput('');
         setError('');
         setLoggedData([]);
+        setMarkers([]);
     };
 
     const cancelSave = () => {
@@ -234,6 +269,7 @@ function LiveView({
         setJobInput('');
         setError('');
         setLoggedData([]);
+        setMarkers([]);
     };
 
     const handleTagChange = (index, value) => {
@@ -407,21 +443,65 @@ function LiveView({
                             </div>
                         </div>
                     ) : (
-                        <div className="logging-active-group">
-                            <button onClick={stopLogging} className="action-btn large stop-btn">
-                                <span className="square"></span> Stop & Save Project
-                            </button>
-                            <div className="logging-status">
-                                <span className="pulse-dot"></span>
-                                Recording: {loggedData.length} samples collected
-                                {lastAutosave && (
-                                    <span className="autosave-indicator">
-                                        <span className="check">&#10003;</span>
-                                        Auto-saved {lastAutosave.toLocaleTimeString()}
-                                    </span>
+                        <>
+                            <div className="logging-active-group">
+                                <button onClick={stopLogging} className="action-btn large stop-btn">
+                                    <span className="square"></span> Stop & Save Project
+                                </button>
+                                <div className="logging-status">
+                                    <span className="pulse-dot"></span>
+                                    Recording: {loggedData.length} samples collected
+                                    {lastAutosave && (
+                                        <span className="autosave-indicator">
+                                            <span className="check">&#10003;</span>
+                                            Auto-saved {lastAutosave.toLocaleTimeString()}
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="marker-controls" style={{ marginTop: 12, padding: '12px 14px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm, 8px)' }}>
+                                <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <span style={{ fontWeight: 700, fontSize: '0.78rem', color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>TEST PHASE MARKERS</span>
+                                    <button
+                                        onClick={() => toggleMarker('function', 'Function Test')}
+                                        className="action-btn"
+                                        style={{ background: isPhaseOpen('function') ? '#ef4444' : '#0ea5e9' }}
+                                    >
+                                        {isPhaseOpen('function') ? '⏹ End Function Test' : '▶ Start Function Test'}
+                                    </button>
+                                    <button
+                                        onClick={() => toggleMarker('static', 'Static Hold')}
+                                        className="action-btn"
+                                        style={{ background: isPhaseOpen('static') ? '#ef4444' : '#8b5cf6' }}
+                                    >
+                                        {isPhaseOpen('static') ? '⏹ End Static Hold' : '▶ Start Static Hold'}
+                                    </button>
+                                    {markers.length > 0 && (
+                                        <button onClick={undoLastMarker} className="action-btn secondary" title="Remove the most recent mark">
+                                            ↩ Undo Last
+                                        </button>
+                                    )}
+                                </div>
+                                {markers.length > 0 && (
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                                        {markers.map((m, i) => (
+                                            <span key={i} style={{
+                                                display: 'inline-flex', alignItems: 'center', gap: 6,
+                                                fontSize: '0.78rem', padding: '3px 9px', borderRadius: 999,
+                                                background: m.phase === 'function' ? 'rgba(14,165,233,0.15)' : 'rgba(139,92,246,0.15)',
+                                                border: `1px solid ${m.phase === 'function' ? 'rgba(14,165,233,0.4)' : 'rgba(139,92,246,0.4)'}`,
+                                                color: 'var(--text-primary)'
+                                            }}>
+                                                <span style={{ width: 7, height: 7, borderRadius: '50%', background: m.edge === 'start' ? '#22c55e' : '#ef4444' }}></span>
+                                                {m.label}
+                                                <strong style={{ color: 'var(--text-secondary)' }}>{formatElapsed(m.elapsedMs)}</strong>
+                                            </span>
+                                        ))}
+                                    </div>
                                 )}
                             </div>
-                        </div>
+                        </>
                     )}
                 </div>
             </div>
@@ -528,6 +608,7 @@ function LiveView({
             <ErrorBoundary>
                 <LiveGraph
                     data={isLogging ? loggedData : previewData}
+                    markers={isLogging ? markers : []}
                     activeTags={selectedTags.slice(0, cellCount)}
                     companyName={selectedJob?.LeadCompany || selectedJob?.Customer}
                     jobNumber={jobInput || selectedJob?.QuoteNum}

@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         return () => ipcRenderer.removeListener('live-data-packet', handler);
     },
     savePDF: (title) => ipcRenderer.invoke('storage:savePDF', title),
+    sendCertificateEmail: (opts) => ipcRenderer.invoke('email:sendCertificate', opts),
     saveCSV: (data, defaultName) => ipcRenderer.invoke('storage:saveCSV', data, defaultName),
 
     // Settings & SharePoint
