@@ -717,6 +717,7 @@ function loadLeaksFromDisk() {
         return Array.isArray(parsed) ? parsed : [];
     } catch (e) {
         console.error('[LEAKS] Failed to load:', e.message);
+        if (e instanceof SyntaxError) backupCorruptFile(LEAKS_FILE, 'LEAKS');
         return [];
     }
 }
@@ -784,8 +785,8 @@ function scanForDongle() {
     }
 }
 
-// Start scanning for T24 dongle
-setInterval(scanForDongle, DEVICE_SCAN_INTERVAL_MS);
+// Start scanning for T24 dongle (handle kept so it can be cleared on quit)
+const deviceScanTimer = setInterval(scanForDongle, DEVICE_SCAN_INTERVAL_MS);
 
 async function handleSavePDF(event, title) {
     const { filePath } = await dialog.showSaveDialog({
@@ -864,7 +865,10 @@ async function handleEmailCertificate(event, opts) {
             }]
         };
 
-        const token = await getAccessToken(['Mail.Send']);
+        // Silent-only: by the time a user reaches the email dialog they've signed in for
+        // SharePoint (which now also consents Mail.Send), so a token is cached. If not,
+        // fail with clear guidance instead of hanging "Sending…" on a device-code login.
+        const token = await getAccessToken(['Mail.Send'], { silentOnly: true });
         const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -1020,6 +1024,21 @@ async function handleFileOpen() {
 
 function getDataPath(filename) {
     return path.join(app.getPath('userData'), filename || 'dashboard-data.json');
+}
+
+// Move a corrupt JSON data file aside (instead of silently returning empty and letting
+// the next save overwrite it) so the data is recoverable. Mirrors the settings/
+// calibration backup behavior. Call only on JSON parse (SyntaxError) failures.
+function backupCorruptFile(filePath, tag) {
+    try {
+        if (fs.existsSync(filePath)) {
+            const backup = `${filePath}.corrupted.${Date.now()}`;
+            fs.renameSync(filePath, backup);
+            console.warn(`[${tag || 'DATA'}] Corrupt file backed up to: ${backup}`);
+        }
+    } catch (e) {
+        console.error(`[${tag || 'DATA'}] Failed to back up corrupt file:`, e.message);
+    }
 }
 
 // --- Settings Management ---
@@ -1306,6 +1325,7 @@ function loadJobCache() {
             return data;
         } catch (e) {
             console.error('Failed to load job cache:', e);
+            if (e instanceof SyntaxError) backupCorruptFile(cachePath, 'JOBS-CACHE');
             return null;
         }
     }
@@ -1720,7 +1740,15 @@ const tokenCachePlugin = {
     },
 };
 
-async function getAccessToken(scopes = ['Files.Read.All', 'Sites.Read.All']) {
+// All delegated Microsoft Graph scopes the app uses. Interactive sign-in requests this
+// full set so a single consent covers SharePoint reads AND sending mail (leak/certificate
+// emails) — preventing a later background device-code prompt just for Mail.Send.
+const APP_SCOPES = ['Files.Read.All', 'Sites.Read.All', 'Mail.Send'];
+
+// options.silentOnly: when true, never fall back to an interactive device-code sign-in —
+//   throw instead. Background senders (leak/cert email) use this so they fail and retry
+//   quietly rather than launching a Microsoft login the user never initiated.
+async function getAccessToken(scopes = ['Files.Read.All', 'Sites.Read.All'], { silentOnly = false } = {}) {
     const settings = loadSettings();
 
     // START CHANGE: Prioritize Settings over .env and fix client reset
@@ -1785,13 +1813,23 @@ async function getAccessToken(scopes = ['Files.Read.All', 'Sites.Read.All']) {
         // Don't return null, let flow continue to interactive or throw if critical
     }
 
+    // Background callers (leak/certificate email) suppress interactive auth: with no
+    // silent token available, throw so they can queue/retry instead of popping a login.
+    if (silentOnly) {
+        throw new Error('Microsoft sign-in required to send email. Open the Dashboard and click "Refresh Job List" to sign in, then try again.');
+    }
+
     try {
         console.log('🔐 Initiating device code flow...');
         console.log('   Client ID:', clientId);
         console.log('   Tenant ID:', tenantId);
 
+        // Consent to the full app scope set during interactive sign-in (not just the
+        // scopes this call needed) so Mail.Send is granted up front alongside SharePoint.
+        const interactiveScopes = [...new Set([...scopes, ...APP_SCOPES])];
+
         const authResponse = await msalClient.acquireTokenByDeviceCode({
-            scopes: scopes,
+            scopes: interactiveScopes,
             // No timeout - use MSAL default (900 seconds / 15 minutes)
             deviceCodeCallback: (response) => {
                 console.log('📱 Device code received:', response.userCode);
@@ -1845,6 +1883,14 @@ function saveLeakOutbox() {
 }
 leakOutbox = loadLeakOutbox();
 
+// Escape user-supplied text before interpolating into HTML email bodies. Leak fields
+// arrive from the companion app over the LAN, so they must never be trusted as markup.
+function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+}
+
 function buildLeakEmailPayload(leak) {
     const sevLabel = (leak.severity || 'minor').toUpperCase();
     const when = new Date(leak.timestamp || Date.now());
@@ -1862,15 +1908,15 @@ function buildLeakEmailPayload(leak) {
     const html = `
 <div style="font-family:Segoe UI,Arial,sans-serif;max-width:640px;">
   <div style="background:#1a3a6c;color:#fff;padding:16px 20px;border-radius:6px 6px 0 0;">
-    <h2 style="margin:0;font-size:18px;">Leak Report — <span style="color:${sevColor};background:#fff;padding:2px 10px;border-radius:4px;font-size:14px;">${sevLabel}</span></h2>
+    <h2 style="margin:0;font-size:18px;">Leak Report — <span style="color:${sevColor};background:#fff;padding:2px 10px;border-radius:4px;font-size:14px;">${escapeHtml(sevLabel)}</span></h2>
   </div>
   <div style="border:1px solid #ddd;border-top:none;padding:20px;border-radius:0 0 6px 6px;">
     <table style="border-collapse:collapse;width:100%;margin-bottom:16px;">
       <tr><td style="padding:6px 12px;font-weight:600;color:#555;">Date</td><td style="padding:6px 12px;">${dateStr} at ${timeStr}</td></tr>
-      <tr><td style="padding:6px 12px;font-weight:600;color:#555;">Severity</td><td style="padding:6px 12px;font-weight:700;color:${sevColor};">${sevLabel}</td></tr>
-      ${leak.serial ? `<tr><td style="padding:6px 12px;font-weight:600;color:#555;">Waterbag S/N</td><td style="padding:6px 12px;">${leak.serial}</td></tr>` : ''}
+      <tr><td style="padding:6px 12px;font-weight:600;color:#555;">Severity</td><td style="padding:6px 12px;font-weight:700;color:${sevColor};">${escapeHtml(sevLabel)}</td></tr>
+      ${leak.serial ? `<tr><td style="padding:6px 12px;font-weight:600;color:#555;">Waterbag S/N</td><td style="padding:6px 12px;">${escapeHtml(leak.serial)}</td></tr>` : ''}
       ${gpsLine}
-      <tr><td style="padding:6px 12px;font-weight:600;color:#555;vertical-align:top;">Description</td><td style="padding:6px 12px;">${leak.description}</td></tr>
+      <tr><td style="padding:6px 12px;font-weight:600;color:#555;vertical-align:top;">Description</td><td style="padding:6px 12px;">${escapeHtml(leak.description)}</td></tr>
     </table>
     ${leak.dataUrl ? '<p style="font-weight:600;color:#555;margin-bottom:8px;">Photo:</p><img src="cid:leak-photo" style="max-width:100%;border-radius:4px;border:1px solid #ddd;" />' : ''}
   </div>
@@ -1901,7 +1947,9 @@ function buildLeakEmailPayload(leak) {
 }
 
 async function trySendLeakEmail(entry) {
-    const token = await getAccessToken(['Mail.Send']);
+    // Background send — never trigger interactive auth; if there's no cached Mail.Send
+    // token yet, this throws and sendLeakEmail queues the email for silent retry.
+    const token = await getAccessToken(['Mail.Send'], { silentOnly: true });
     const resp = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -2671,6 +2719,7 @@ function loadData(event, filename) {
         return null;
     } catch (error) {
         console.error('Failed to load data:', error);
+        if (error instanceof SyntaxError) backupCorruptFile(dataPath, 'DATA');
         return null;
     }
 }
@@ -2948,7 +2997,7 @@ app.whenReady().then(() => {
             const result = await companionServer.start();
             // Sync current device status immediately so phones see the correct state
             companionServer.updateSessionState({ deviceStatus });
-            return { success: true, port: result.port, ips: result.ips };
+            return { success: true, port: result.port, ips: result.ips, token: companionServer.authToken };
         } catch (err) {
             console.error('[COMPANION] Start failed:', err);
             return { success: false, error: err.message };
@@ -3150,6 +3199,21 @@ app.whenReady().then(() => {
             createWindow();
         }
     });
+});
+
+// Tear down background work cleanly on quit: stop the dongle scan loop and all T24
+// reader timers (keep-awake / poll / watchdog), release the power-save blocker, and
+// stop the companion server. Prevents leaked intervals and a stuck OS-sleep blocker.
+let didQuitCleanup = false;
+app.on('before-quit', () => {
+    if (didQuitCleanup) return;
+    didQuitCleanup = true;
+    try { clearInterval(deviceScanTimer); } catch (e) { }
+    try { t24Reader.stopSafetyLog(); } catch (e) { }   // stops watchdog + releases powerSaveBlocker
+    try { t24Reader.stopPolling(); } catch (e) { }
+    try { t24Reader.close(); } catch (e) { }            // stops keep-awake + closes HID device
+    try { companionServer.stop().catch(() => { }); } catch (e) { }
+    console.log('[QUIT] Cleaned up timers, reader, and companion server.');
 });
 
 app.on('window-all-closed', () => {

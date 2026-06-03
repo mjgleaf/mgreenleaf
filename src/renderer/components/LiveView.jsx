@@ -28,7 +28,11 @@ function LiveView({
     displayUnit,
     onUnitChange,
     xUnit,
-    onXUnitChange
+    onXUnitChange,
+    companionRunning,
+    companionClients,
+    onStartCompanion,
+    onOpenCompanion
 }) {
     const [showJobPrompt, setShowJobPrompt] = useState(false);
     const [jobInput, setJobInput] = useState('');
@@ -413,6 +417,28 @@ function LiveView({
                             style={{ width: '80px' }} />
                         <span>lbs</span>
                     </div>
+                </div>
+                <div className="serial-box">
+                    <span className="label">COMPANION APP</span>
+                    {companionRunning ? (
+                        <button
+                            onClick={onOpenCompanion}
+                            className="action-btn secondary"
+                            style={{ fontSize: '0.78rem', padding: '4px 12px', whiteSpace: 'nowrap' }}
+                            title="Companion server is running — tap to view the phone connection link"
+                        >
+                            📱 Running{companionClients > 0 ? ` (${companionClients})` : ''} — Show Link
+                        </button>
+                    ) : (
+                        <button
+                            onClick={onStartCompanion}
+                            className="action-btn"
+                            style={{ fontSize: '0.78rem', padding: '4px 12px', whiteSpace: 'nowrap' }}
+                            title="Start the companion server so field crew can watch live data on their phones"
+                        >
+                            📱 Start Server
+                        </button>
+                    )}
                 </div>
             </div>
 

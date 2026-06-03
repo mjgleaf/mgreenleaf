@@ -10,6 +10,7 @@ import ReportView from './ReportView';
 import CertificateView from './CertificateView';
 import { SettingsView } from './SettingsView';
 import JobSelector from './JobSelector';
+import { QRCodeSVG } from 'qrcode.react';
 import { getElectronAPI } from '../utils/electronAPI';
 
 const navInitialState = {
@@ -60,11 +61,19 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [deviceStatus, setDeviceStatus] = useState('disconnected');
     const [recoverySession, setRecoverySession] = useState(null);
     const [showRecoveryPrompt, setShowRecoveryPrompt] = useState(false);
+    // Set when a job is selected from the dashboard so the certificate section
+    // offers to generate the cert with AI on arrival. Reset once the user answers.
+    const [aiPromptPending, setAiPromptPending] = useState(false);
+    // When leaving the certificate screen with a set-up cert, ask whether to save it
+    // as a draft. pendingLeaveCert holds the navigation to run once the user answers.
+    const [showSaveCertPrompt, setShowSaveCertPrompt] = useState(false);
+    const [pendingLeaveCert, setPendingLeaveCert] = useState(null);
 
     // Companion Server state
     const [companionRunning, setCompanionRunning] = useState(false);
     const [companionIPs, setCompanionIPs] = useState([]);
     const [companionPort, setCompanionPort] = useState(3001);
+    const [companionToken, setCompanionToken] = useState('');
     const [companionClients, setCompanionClients] = useState(0);
     const [companionPhotos, setCompanionPhotos] = useState([]);
     const [companionLeaks, setCompanionLeaks] = useState([]);
@@ -433,6 +442,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                 const status = await getElectronAPI().companionStatus();
                 setCompanionRunning(status.running);
                 setCompanionClients(status.clients);
+                if (status.token) setCompanionToken(status.token);
                 if (status.running) setCompanionIPs(status.ips);
             } catch (e) { /* ignore */ }
         };
@@ -496,6 +506,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             setCompanionRunning(true);
             setCompanionIPs(result.ips);
             setCompanionPort(result.port);
+            setCompanionToken(result.token || '');
         }
     };
 
@@ -512,6 +523,51 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             jobs: allJobs,
             lastActiveJobId: id
         }, 'dashboard-data.json');
+    };
+
+    // Persist the current certificate setup as a single rolling "auto-saved" draft on
+    // the active job (keyed by job number). Updates in place so the drafts list isn't
+    // flooded; manual "Save as Draft" snapshots are left untouched. Saves immediately
+    // (not via the debounced engine) so it survives navigating back to the main menu.
+    const saveCertDraft = () => {
+        const job = allJobs.find(j => j.id.toString() === activeJobId?.toString());
+        const certData = job?.metadata?.certData;
+        if (!certData) return;
+        const jobNum = job.metadata?.jobNumber || activeJobId;
+        const autoDraft = {
+            name: `Auto-saved — Job ${jobNum}`,
+            data: { ...certData },
+            timestamp: Date.now(),
+            auto: true,
+        };
+        const existing = job.metadata?.drafts || [];
+        const idx = existing.findIndex(d => d.auto);
+        const newDrafts = idx >= 0
+            ? existing.map((d, i) => (i === idx ? autoDraft : d))
+            : [autoDraft, ...existing];
+        const updatedJobs = allJobs.map(j => j.id.toString() === activeJobId?.toString()
+            ? { ...j, metadata: { ...j.metadata, drafts: newDrafts } }
+            : j);
+        setAllJobs(updatedJobs);
+        getElectronAPI().saveData({ jobs: updatedJobs, lastActiveJobId: activeJobId }, 'dashboard-data.json');
+    };
+
+    // Guard navigation away from the certificate tab: if the user has set up a cert,
+    // ask whether to save it as a draft first, then run the requested navigation.
+    const leaveCert = (proceed) => {
+        if (activeTab === 'cert' && activeJob?.metadata?.certData) {
+            setPendingLeaveCert(() => proceed);
+            setShowSaveCertPrompt(true);
+        } else {
+            proceed();
+        }
+    };
+
+    const runPendingLeaveCert = () => {
+        const proceed = pendingLeaveCert;
+        setPendingLeaveCert(null);
+        setShowSaveCertPrompt(false);
+        if (typeof proceed === 'function') proceed();
     };
 
     // Selecting a SharePoint job immediately makes it a persistent, autosaving
@@ -550,6 +606,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             PONumber: spJob.PONumber
         });
         setActiveTab('cert');
+        // Arriving at the certificate from a job selection -> offer AI generation.
+        setAiPromptPending(true);
     };
 
     const triggerAppendData = (job) => {
@@ -644,18 +702,18 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             <main className="app-content">
                 {!isCertPreview && (
                     <div className="sidebar no-print">
-                        <button className="nav-btn home-btn" onClick={onGoHome}>🏠 Back to Main Menu</button>
-                        <button className={`nav-btn ${activeTab === 'welcome' ? 'active' : ''}`} onClick={() => { setActiveTab('welcome'); setImportContext(null); }}>Dashboard & Jobs</button>
-                        <button className={`nav-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => setActiveTab('live')}>Live Data</button>
-                        <button className={`nav-btn ${activeTab === 'import' ? 'active' : ''}`} onClick={() => { if (activeJob) { triggerAppendData(activeJob); } else { setActiveTab('import'); setImportContext(null); } }}>Import CSV</button>
-                        <button className={`nav-btn ${activeTab === 'report' ? 'active' : ''}`} onClick={() => setActiveTab('report')}>Saved Projects / Reports</button>
+                        <button className="nav-btn home-btn" onClick={() => leaveCert(onGoHome)}>🏠 Back to Main Menu</button>
+                        <button className={`nav-btn ${activeTab === 'welcome' ? 'active' : ''}`} onClick={() => leaveCert(() => { setActiveTab('welcome'); setImportContext(null); })}>Dashboard & Jobs</button>
+                        <button className={`nav-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('live'))}>Live Data</button>
+                        <button className={`nav-btn ${activeTab === 'import' ? 'active' : ''}`} onClick={() => leaveCert(() => { if (activeJob) { triggerAppendData(activeJob); } else { setActiveTab('import'); setImportContext(null); } })}>Import CSV</button>
+                        <button className={`nav-btn ${activeTab === 'report' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('report'))}>Saved Projects / Reports</button>
                         <button className={`nav-btn ${activeTab === 'cert' ? 'active' : ''}`} onClick={() => setActiveTab('cert')}>Certificate</button>
-                        <button className={`nav-btn ${activeTab === 'leaks' ? 'active' : ''}`} onClick={() => setActiveTab('leaks')}>Leak Logs{companionLeaks.length > 0 ? ` (${companionLeaks.length})` : ''}</button>
-                        <button className={`nav-btn ${activeTab === 'companion' ? 'active' : ''}`} onClick={() => setActiveTab('companion')}>
+                        <button className={`nav-btn ${activeTab === 'leaks' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('leaks'))}>Leak Logs{companionLeaks.length > 0 ? ` (${companionLeaks.length})` : ''}</button>
+                        <button className={`nav-btn ${activeTab === 'companion' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('companion'))}>
                             📱 Companion{companionRunning ? ` (${companionClients})` : ''}
                         </button>
                         <div className="flex-grow"></div>
-                        <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')}>Settings</button>
+                        <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('settings'))}>Settings</button>
                     </div>
                 )}
                 <div className="content-area" style={isCertPreview ? { padding: 0, margin: 0, overflowY: 'auto' } : {}}>
@@ -713,6 +771,10 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 onUnitChange={setDisplayUnit}
                                 xUnit={xUnit}
                                 onXUnitChange={setXUnit}
+                                companionRunning={companionRunning}
+                                companionClients={companionClients}
+                                onStartCompanion={handleCompanionStart}
+                                onOpenCompanion={() => setActiveTab('companion')}
                             />
                         </ErrorBoundary>
                     )}
@@ -746,6 +808,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             onPreviewModeChange={(val) => setIsCertPreview(val)}
                             xUnit={xUnit}
                             displayUnit={displayUnit}
+                            promptAiOnArrival={aiPromptPending}
+                            onAiPromptResolved={() => setAiPromptPending(false)}
                         />
                     )}
                     {activeTab === 'leaks' && (
@@ -878,29 +942,36 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 }}>
                                     <h3 style={{ margin: '0 0 1rem 0' }}>📲 Connect a Phone</h3>
                                     <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
-                                        Make sure the phone is on the <strong>same WiFi network</strong> as this computer, then open one of these URLs in the phone's browser:
+                                        Make sure the phone is on the <strong>same WiFi network</strong> as this computer, then <strong>scan the QR code</strong> with the phone's camera (or tap Copy and open the link):
                                     </p>
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                         {companionIPs.map((ip, i) => {
-                                            const url = `http://${ip.address}:${companionPort}`;
+                                            const shortUrl = `http://${ip.address}:${companionPort}`;
+                                            const fullUrl = shortUrl + '/' + (companionToken ? `?t=${companionToken}` : '');
                                             return (
                                                 <div key={i} style={{
-                                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                                    display: 'flex', alignItems: 'center', gap: '14px',
                                                     background: 'var(--bg-main)', borderRadius: '8px', padding: '12px 16px',
                                                     border: '1px solid var(--border-color)'
                                                 }}>
-                                                    <div>
+                                                    {companionToken && (
+                                                        <div style={{ background: '#fff', padding: '6px', borderRadius: '8px', lineHeight: 0, flexShrink: 0 }}>
+                                                            <QRCodeSVG value={fullUrl} size={96} />
+                                                        </div>
+                                                    )}
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
                                                         <div style={{ fontFamily: 'monospace', fontSize: '1.1rem', fontWeight: 600, color: 'var(--accent-primary)' }}>
-                                                            {url}
+                                                            {shortUrl}
                                                         </div>
                                                         <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '2px' }}>
-                                                            {ip.name}
+                                                            {ip.name} &middot; 📷 Scan the QR to connect
                                                         </div>
                                                     </div>
                                                     <button
                                                         className="action-btn secondary"
-                                                        style={{ fontSize: '0.85rem', padding: '6px 14px' }}
-                                                        onClick={() => navigator.clipboard.writeText(url)}
+                                                        style={{ fontSize: '0.85rem', padding: '6px 14px', flexShrink: 0 }}
+                                                        onClick={() => navigator.clipboard.writeText(fullUrl)}
+                                                        title="Copy the full link (includes the access token)"
                                                     >
                                                         📋 Copy
                                                     </button>
@@ -1039,6 +1110,24 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                     {activeTab === 'settings' && <SettingsView onSettingsSaved={() => { }} />}
                 </div>
             </main>
+
+            {showSaveCertPrompt && (
+                <div className="modal-overlay" onClick={() => { setPendingLeaveCert(null); setShowSaveCertPrompt(false); }}>
+                    <div className="job-prompt-card" style={{ maxWidth: '460px', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                        <div style={{ fontSize: '2.2rem', marginBottom: '8px' }}>💾</div>
+                        <h3 style={{ marginBottom: '6px' }}>Save certificate draft?</h3>
+                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '18px' }}>
+                            Save your current certificate setup as a draft for job{' '}
+                            <strong>{activeJob?.metadata?.jobNumber || activeJobId}</strong>? This updates the
+                            job's auto-saved draft so you can pick up right where you left off.
+                        </p>
+                        <div className="form-actions" style={{ justifyContent: 'center' }}>
+                            <button onClick={() => { saveCertDraft(); runPendingLeaveCert(); }} className="action-btn">💾 Save Draft</button>
+                            <button onClick={runPendingLeaveCert} className="action-btn secondary ml-4">Don't Save</button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {showRecoveryPrompt && (
                 <div className="modal-overlay">

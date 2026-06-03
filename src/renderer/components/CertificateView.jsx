@@ -178,7 +178,7 @@ const buildDefaultFormData = () => ({
     }))
 });
 
-const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit }) => {
+const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit, promptAiOnArrival, onAiPromptResolved }) => {
     // data is actually the job object now due to activeJob refactor
     const job = data;
     const dataSets = job?.dataSets || [];
@@ -336,6 +336,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const aiChatEndRef = useRef(null);
     const [aiLayoutOverrides, setAiLayoutOverrides] = useState(null);
     const [aiLayoutLoading, setAiLayoutLoading] = useState(false);
+    // "Generate with AI?" prompt shown when arriving here from a dashboard job selection.
+    const [showAiPrompt, setShowAiPrompt] = useState(false);
 
     // Email Certificate dialog
     const [showEmailDialog, setShowEmailDialog] = useState(false);
@@ -390,7 +392,23 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     // We compute stats for each dataset individually for the preview
     const allChartStats = useMemo(() => {
         const serials = formData.instruments?.map(inst => inst.serialNo).filter(Boolean).flatMap(s => s.split(/[, \s]+/)) || [];
-        return dataSets.map(ds => processChartData(ds.data, serials, displayUnit, xUnit));
+        return dataSets.map(ds => {
+            // Resolve the dataset's input time unit (explicit or detected from headers),
+            // matching ReportView, then pass display/input/x units in the CORRECT argument
+            // slots so the certificate graphs scale identically to the Reports tab. (This
+            // call previously passed xUnit into the displayTimeUnit slot and omitted
+            // inputTimeUnit, which mis-scaled the cert preview x-axis.)
+            let inputTimeUnit = ds.inputTimeUnit;
+            if (!inputTimeUnit && ds.data?.length > 0) {
+                const headers = Object.keys(ds.data[0]);
+                const timeHeader = headers.find(h => /elapsed|second/i.test(h)) || headers.find(h => /time|stamp/i.test(h)) || '';
+                if (/ms|millisecond/i.test(timeHeader)) inputTimeUnit = 'ms';
+                else if (/min/i.test(timeHeader)) inputTimeUnit = 'min';
+                else if (/hour|hr/i.test(timeHeader)) inputTimeUnit = 'hrs';
+                else inputTimeUnit = 'sec';
+            }
+            return processChartData(ds.data, serials, displayUnit, xUnit === 'hour' ? 'hrs' : 'min', inputTimeUnit || 'sec', xUnit, ds.chartMode || 'perCell');
+        });
     }, [dataSets, formData.instruments, displayUnit, xUnit]);
 
     // chartStats (legacy single) points to the first one for auto-fill logic
@@ -402,6 +420,23 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             if (onPreviewModeChange) onPreviewModeChange(false);
         };
     }, []);
+
+    // The parent flips promptAiOnArrival to true each time a job is selected from
+    // the dashboard. Show the "Generate with AI?" prompt once per selection.
+    useEffect(() => {
+        if (promptAiOnArrival) setShowAiPrompt(true);
+    }, [promptAiOnArrival]);
+
+    const acceptAiPrompt = () => {
+        setShowAiPrompt(false);
+        if (onAiPromptResolved) onAiPromptResolved();
+        setShowAiGenerator(true);
+    };
+
+    const dismissAiPrompt = () => {
+        setShowAiPrompt(false);
+        if (onAiPromptResolved) onAiPromptResolved();
+    };
 
     useEffect(() => {
         const load = async () => {
@@ -1062,8 +1097,13 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         }
     };
 
+    // Certificate file name: "Certificate_<job number>" for the saved PDF and the
+    // emailed attachment. Falls back to the cert number, then a plain "Certificate".
+    const certIdentifier = job?.metadata?.jobNumber || formData.certNo;
+    const certFileBase = certIdentifier ? `Certificate_${certIdentifier}` : 'Certificate';
+
     const finalizePDF = async () => {
-        await getElectronAPI().savePDF(`Certificate_${formData.certNo || 'Draft'}`);
+        await getElectronAPI().savePDF(certFileBase);
         // Register certificate in registry
         if (formData.certNo && getElectronAPI().certRegister) {
             await getElectronAPI().certRegister({
@@ -1117,14 +1157,18 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         const to = resolveContactEmail(spJob);
         const contactName = (spJob?.ContactName && String(spJob.ContactName).trim())
             || formData.buyer || formData.soldTo || spJob?.Customer || 'Customer';
-        const certNo = formData.certNo || 'Draft';
+        const certNo = formData.certNo ? formData.certNo.trim() : '';
 
         setEmailTo(to);
         setEmailCc('sales@hydrowates.com');
-        setEmailSubject(`Load Test Certificate ${certNo}${formData.projectRef ? ` — ${formData.projectRef}` : ''}`);
+        const subjectLabel = certNo ? `Load Test Certificate ${certNo}` : 'Load Test Certificate';
+        setEmailSubject(`${subjectLabel}${formData.projectRef ? ` — ${formData.projectRef}` : ''}`);
+        const bodyCertPhrase = certNo
+            ? `Please find attached load test certificate ${certNo} for your records.`
+            : `Please find attached your load test certificate for your records.`;
         setEmailBody(
             `Hello ${contactName},\n\n` +
-            `Please find attached load test certificate ${certNo} for your records.\n\n` +
+            `${bodyCertPhrase}\n\n` +
             `Kind regards,\nHydro-Wates`
         );
         setEmailStatus(to ? null : { type: 'error', message: 'No contact email was found on the Leads List for this job — please enter one.' });
@@ -1144,7 +1188,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 cc: emailCc,
                 subject: emailSubject,
                 body: emailBody,
-                fileName: `Certificate_${formData.certNo || 'Draft'}`
+                fileName: certFileBase
             });
             if (result?.success) {
                 setEmailStatus({ type: 'success', message: 'Certificate emailed successfully.' });
@@ -1231,7 +1275,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     <textarea value={emailBody} onChange={(e) => setEmailBody(e.target.value)} rows={7} style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }} />
                                 </div>
                                 <div style={{ fontSize: '13px', color: '#555', background: '#f1f5f9', borderRadius: '6px', padding: '8px 12px', marginBottom: '14px' }}>
-                                    📎 The current certificate preview will be attached as <strong>Certificate_{formData.certNo || 'Draft'}.pdf</strong> and sent from your signed-in Microsoft account.
+                                    📎 The current certificate preview will be attached as <strong>{certFileBase}.pdf</strong> and sent from your signed-in Microsoft account.
                                 </div>
                                 {emailStatus && (
                                     <div style={{ fontSize: '13px', padding: '8px 12px', borderRadius: '6px', marginBottom: '14px', background: emailStatus.type === 'success' ? '#dcfce7' : '#fee2e2', color: emailStatus.type === 'success' ? '#166534' : '#991b1b' }}>
@@ -2992,6 +3036,24 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     👁️ Preview Full Certificate
                 </button>
             </div>
+
+            {showAiPrompt && (
+                <div className="modal-overlay" onClick={dismissAiPrompt}>
+                    <div className="job-prompt-card" style={{ maxWidth: '440px', textAlign: 'center' }} onClick={e => e.stopPropagation()}>
+                        <div style={{ fontSize: '2.4rem', marginBottom: '8px' }}>🤖</div>
+                        <h3 style={{ marginBottom: '6px' }}>Generate Certificate with AI?</h3>
+                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', marginBottom: '18px' }}>
+                            Want OSCAR to help build this certificate? Describe the load test and AI
+                            will fill in the template &mdash; equipment, tests, standards, and more.
+                            You can edit everything afterward.
+                        </p>
+                        <div className="form-actions" style={{ justifyContent: 'center' }}>
+                            <button onClick={acceptAiPrompt} className="action-btn">🤖 Yes, use AI</button>
+                            <button onClick={dismissAiPrompt} className="action-btn secondary ml-4">No, I'll fill it in</button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {showAiGenerator && (
                 <div className="modal-overlay" onClick={() => !aiLoading && setShowAiGenerator(false)}>

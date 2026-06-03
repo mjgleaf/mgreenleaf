@@ -346,6 +346,27 @@
     (function() {
         'use strict';
 
+        // ── Session token ──
+        // Taken from the connect URL (?t=...) and remembered in localStorage so the PWA
+        // keeps working when relaunched from the home screen without the query string.
+        const AUTH_TOKEN = (() => {
+            let t = '';
+            try { t = new URLSearchParams(location.search).get('t') || ''; } catch (e) {}
+            try {
+                if (t) localStorage.setItem('oscarCompanionToken', t);
+                else t = localStorage.getItem('oscarCompanionToken') || '';
+            } catch (e) {}
+            return t;
+        })();
+
+        // fetch() wrapper that attaches the bearer token to every API call.
+        function apiFetch(path, opts) {
+            opts = opts || {};
+            const headers = Object.assign({}, opts.headers || {});
+            if (AUTH_TOKEN) headers['Authorization'] = 'Bearer ' + AUTH_TOKEN;
+            return fetch(path, Object.assign({}, opts, { headers }));
+        }
+
         // ── State ──
         let state = {
             connected: false,
@@ -377,7 +398,7 @@
         // ── WebSocket Connection ──
         function connectWS() {
             const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const url = `${proto}//${location.host}`;
+            const url = `${proto}//${location.host}/?t=${encodeURIComponent(AUTH_TOKEN)}`;
 
             try {
                 ws = new WebSocket(url);
@@ -391,7 +412,7 @@
                 if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
                 render();
                 // Fetch initial state
-                fetch('/api/state').then(r => r.json()).then(s => {
+                apiFetch('/api/state').then(r => r.json()).then(s => {
                     Object.assign(state, s);
                     state.wsConnected = true;
                     render();
@@ -493,7 +514,7 @@
                 reader.onload = (ev) => {
                     const dataUrl = ev.target.result;
                     // Send to OSCAR
-                    fetch('/api/photo', {
+                    apiFetch('/api/photo', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ dataUrl, timestamp: Date.now(), gps: state.gps })
@@ -568,7 +589,7 @@
             if (!draft || !draft.dataUrl || !draft.description.trim()) return;
             state.leakSubmitting = true;
             render();
-            fetch('/api/leak', {
+            apiFetch('/api/leak', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -599,7 +620,7 @@
 
         function deleteLeak(id) {
             if (!confirm('Delete this leak report?')) return;
-            fetch('/api/leaks/' + encodeURIComponent(id), { method: 'DELETE' })
+            apiFetch('/api/leaks/' + encodeURIComponent(id), { method: 'DELETE' })
                 .catch(() => {});
             // Optimistic update — broadcast will also sync
             state.leaks = (state.leaks || []).filter(l => l.id !== id);

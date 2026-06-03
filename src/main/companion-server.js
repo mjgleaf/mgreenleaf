@@ -15,15 +15,36 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 class CompanionServer {
     constructor() {
         this.app = express();
         this.server = http.createServer(this.app);
-        this.wss = new WebSocket.Server({ server: this.server });
+        // Reject unauthorized WebSocket upgrades during the handshake (cleaner than
+        // accepting then closing). verifyClient runs per-connection, by which time
+        // this.authToken is set. The token rides in the URL (?t=) since browsers can't
+        // set headers on a WebSocket.
+        this.wss = new WebSocket.Server({
+            server: this.server,
+            verifyClient: (info, cb) => {
+                let token = '';
+                try { token = new URL(info.req.url, 'http://localhost').searchParams.get('t') || ''; } catch (e) { /* malformed */ }
+                if (this._tokenValid(token)) return cb(true);
+                console.log('[COMPANION] Rejected WebSocket upgrade (missing/invalid token)');
+                cb(false, 401, 'Unauthorized');
+            }
+        });
         this.port = 3001;
         this.isRunning = false;
         this.clients = new Set();
+        // Per-run bearer token: required on every /api request and the WS upgrade. The
+        // static PWA shell stays public so the page can load; it then authenticates with
+        // this token (passed in the connect URL as ?t=...).
+        this.authToken = crypto.randomBytes(24).toString('hex');
+        // Bound in-memory growth — these endpoints are reachable by any device on the LAN.
+        this.maxLeaks = 1000;
+        this.maxPhotos = 50;
 
         // State that gets broadcast
         this.currentState = {
@@ -49,10 +70,34 @@ class CompanionServer {
         this._setupWebSocket();
     }
 
+    // Accept the token from an Authorization: Bearer header or a ?t= query param.
+    // Uses a constant-time compare to avoid leaking the token via timing.
+    _tokenValid(provided) {
+        if (!provided) return false;
+        const a = Buffer.from(String(provided));
+        const b = Buffer.from(this.authToken);
+        return a.length === b.length && crypto.timingSafeEqual(a, b);
+    }
+
+    _tokenOk(req) {
+        const auth = req.headers['authorization'] || '';
+        const bearer = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+        const q = (req.query && req.query.t) ? String(req.query.t) : '';
+        return this._tokenValid(bearer || q);
+    }
+
     _setupRoutes() {
-        // Serve the mobile PWA
+        // Serve the mobile PWA (static shell is public so the page can load).
         const mobileDir = path.join(__dirname, 'companion-app');
         this.app.use(express.static(mobileDir));
+
+        // Gate the API surface with the session token BEFORE body parsing, so an
+        // unauthorized request is rejected without us buffering its (up to 10MB) body.
+        this.app.use('/api', (req, res, next) => {
+            if (this._tokenOk(req)) return next();
+            res.status(401).json({ error: 'Unauthorized' });
+        });
+
         this.app.use(express.json({ limit: '10mb' }));
 
         // API endpoint for phone to send photos back to OSCAR
@@ -61,6 +106,7 @@ class CompanionServer {
             const { dataUrl, timestamp, gps } = req.body;
             if (dataUrl) {
                 this.photos.push({ dataUrl, timestamp: timestamp || Date.now(), gps: gps || null });
+                if (this.photos.length > this.maxPhotos) this.photos.splice(0, this.photos.length - this.maxPhotos);
                 console.log(`[COMPANION] Photo received from phone (${this.photos.length} total)`);
                 // Notify main window
                 if (this.onPhotoReceived) this.onPhotoReceived({ dataUrl, timestamp, gps });
@@ -92,6 +138,7 @@ class CompanionServer {
                 gps: gps || null
             };
             this.leaks.push(leak);
+            if (this.leaks.length > this.maxLeaks) this.leaks.splice(0, this.leaks.length - this.maxLeaks);
             this.currentState.leaks = this.leaks;
             console.log(`[COMPANION] Leak logged (${this.leaks.length} total): ${description.slice(0, 40)}`);
             this.broadcast('leak', leak);
@@ -141,6 +188,7 @@ class CompanionServer {
 
     _setupWebSocket() {
         this.wss.on('connection', (ws, req) => {
+            // Token already validated during the upgrade by verifyClient above.
             this.clients.add(ws);
             const clientIP = req.socket.remoteAddress;
             console.log(`[COMPANION] Phone connected from ${clientIP} (${this.clients.size} total)`);
@@ -268,7 +316,8 @@ class CompanionServer {
             port: this.port,
             clients: this.clients.size,
             ips: this.isRunning ? this.getLocalIPs() : [],
-            photos: this.photos.length
+            photos: this.photos.length,
+            token: this.authToken
         };
     }
 
