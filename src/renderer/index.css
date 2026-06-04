@@ -314,6 +314,73 @@ body {
   font-weight: 600;
 }
 
+.sidebar-section-label {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: 12px 16px 4px;
+  opacity: 0.6;
+}
+
+.workflow-step {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  padding: 9px 16px 9px 14px;
+  text-align: left;
+  font-size: 0.78rem;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  letter-spacing: 0.02em;
+}
+
+.workflow-step:hover { color: var(--text-primary); background: rgba(255,255,255,0.02); }
+
+.workflow-step.active {
+  color: var(--yellow-accent);
+  border-left-color: var(--yellow-accent);
+  background: linear-gradient(90deg, rgba(240,184,0,0.06), transparent);
+  font-weight: 600;
+}
+
+.workflow-step.completed { color: var(--text-primary); }
+.workflow-step.locked { opacity: 0.4; }
+
+.step-num {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.65rem; font-weight: 700;
+  flex-shrink: 0;
+  border: 1.5px solid var(--text-secondary);
+  color: var(--text-secondary);
+}
+
+.workflow-step.active .step-num {
+  background: var(--yellow-accent);
+  border-color: var(--yellow-accent);
+  color: #000;
+}
+
+.workflow-step.completed .step-num {
+  background: var(--green);
+  border-color: var(--green);
+  color: #000;
+}
+
+.sidebar-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 8px 12px;
+}
+
 .content-area {
   flex: 1;
   padding: 18px 24px;
@@ -778,7 +845,7 @@ body {
 .cert-main-page {
   display: flex;
   flex-direction: column;
-  min-height: 275mm;
+  min-height: 270mm;
   /* A4 (297mm) minus top/bottom padding (10mm + 10mm) approximately */
   position: relative;
 }
@@ -827,7 +894,7 @@ body {
   }
 
   .cert-main-page {
-    min-height: 275mm !important;
+    min-height: 270mm !important;
     break-after: page;
   }
 

@@ -283,15 +283,27 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         getElectronAPI().companionUpdateState({
             selectedTags,
             cellCount,
-            isLogging
+            isLogging,
+            activeJobName: selectedSharePointJob?.JobName || selectedSharePointJob?.QuoteNum
+                || (allJobs.find(j => j.id?.toString() === activeJobId?.toString())?.metadata?.jobNumber) || ''
         });
-    }, [selectedTags, cellCount, isLogging, companionRunning]);
+    }, [selectedTags, cellCount, isLogging, companionRunning, selectedSharePointJob, activeJobId, allJobs]);
+
+    useEffect(() => {
+        const openPhases = [];
+        ['function', 'static'].forEach(phase => {
+            const ph = markers.filter(m => m.phase === phase);
+            if (ph.length > 0 && ph[ph.length - 1].edge === 'start') openPhases.push(phase);
+        });
+        getElectronAPI().companionUpdateState({ openPhases });
+    }, [markers, companionRunning]);
 
     // Push equipment + certificates for the selected SharePoint job to the companion.
     useEffect(() => {
         const api = getElectronAPI();
         if (!api.fetchEquipmentForJob || !api.companionUpdateState) return;
-        const jobNum = selectedSharePointJob?.QuoteNum || selectedSharePointJob?.JobNum || selectedSharePointJob?.JobNumber;
+        const jobNum = selectedSharePointJob?.QuoteNum || selectedSharePointJob?.JobNum || selectedSharePointJob?.JobNumber
+            || (allJobs.find(j => j.id?.toString() === activeJobId?.toString())?.metadata?.jobNumber);
         if (!jobNum) {
             api.companionUpdateState({ equipmentItems: [] });
             return;
@@ -308,7 +320,17 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             }
         })();
         return () => { cancelled = true; };
-    }, [selectedSharePointJob, companionRunning]);
+    }, [selectedSharePointJob, activeJobId, companionRunning]);
+
+    // Auto-advance: recording stopped with data → navigate to Review & Finalize
+    const prevLoggingRef = useRef(isLogging);
+    useEffect(() => {
+        const wasLogging = prevLoggingRef.current;
+        prevLoggingRef.current = isLogging;
+        if (wasLogging && !isLogging && activeJob?.dataSets?.length > 0) {
+            setActiveTab('report');
+        }
+    }, [isLogging]);
 
     const handleRecover = async () => {
         if (getElectronAPI().loadRecovery) {
@@ -478,6 +500,25 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         });
         return () => { if (typeof removeListener === 'function') removeListener(); };
     }, []);
+
+    useEffect(() => {
+        const removeListener = getElectronAPI().onCompanionMarkerToggle?.((phase) => {
+            if (!isLogging) return;
+            const firstTimestamp = loggedData.length > 0 ? loggedData[0].timestamp : Date.now();
+            const phaseLabel = phase === 'function' ? 'Function Test' : 'Static Hold';
+            const phaseMarkers = markers.filter(m => m.phase === phase);
+            const isOpen = phaseMarkers.length > 0 && phaseMarkers[phaseMarkers.length - 1].edge === 'start';
+            const edge = isOpen ? 'end' : 'start';
+            setMarkers(prev => [...prev, {
+                phase,
+                edge,
+                label: `${phaseLabel} ${edge === 'start' ? 'Start' : 'End'}`,
+                elapsedMs: Date.now() - firstTimestamp,
+                timestamp: Date.now()
+            }]);
+        });
+        return () => { if (typeof removeListener === 'function') removeListener(); };
+    }, [isLogging, loggedData, markers]);
 
     // Hydrate leaks from disk on mount and whenever companion server toggles
     useEffect(() => {
@@ -699,21 +740,69 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                     </div>
                 </header>
             )}
+            {!isCertPreview && activeJobId && (() => {
+                const job = allJobs.find(j => j.id?.toString() === activeJobId?.toString());
+                const jobName = selectedSharePointJob?.JobName || selectedSharePointJob?.QuoteNum || job?.metadata?.jobNumber || '';
+                const customer = selectedSharePointJob?.LeadCompany || selectedSharePointJob?.Customer || job?.metadata?.leadCompany || job?.metadata?.customer || '';
+                return jobName ? (
+                    <div className="no-print" style={{ background: 'var(--bg-elevated)', borderBottom: '1px solid var(--border)', padding: '5px 20px', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '0.8rem' }}>
+                        <span style={{ color: 'var(--yellow-accent)', fontWeight: 700 }}>{jobName}</span>
+                        {customer && <span style={{ color: 'var(--text-secondary)' }}>{customer}</span>}
+                    </div>
+                ) : null;
+            })()}
+            {!isCertPreview && isLogging && (
+                <div className="no-print" style={{ background: 'rgba(74,222,128,0.1)', borderBottom: '1px solid var(--green)', padding: '5px 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--green)' }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--green)', animation: 'pulse 1.5s infinite', display: 'inline-block' }}></span>
+                    Recording{loggedData.length > 0 ? ` — ${loggedData.length} samples` : ''}
+                </div>
+            )}
             <main className="app-content">
                 {!isCertPreview && (
                     <div className="sidebar no-print">
-                        <button className="nav-btn home-btn" onClick={() => leaveCert(onGoHome)}>🏠 Back to Main Menu</button>
-                        <button className={`nav-btn ${activeTab === 'welcome' ? 'active' : ''}`} onClick={() => leaveCert(() => { setActiveTab('welcome'); setImportContext(null); })}>Dashboard & Jobs</button>
-                        <button className={`nav-btn ${activeTab === 'live' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('live'))}>Live Data</button>
+                        <button className="nav-btn home-btn" onClick={() => leaveCert(onGoHome)}>🏠 Main Menu</button>
+
+                        <div className="sidebar-section-label">Workflow</div>
+
+                        {(() => {
+                            const jobSelected = !!activeJobId;
+                            const certReady = !!(activeJob?.metadata?.certData?.procedureSummary?.trim());
+                            const hasData = !!(activeJob?.dataSets?.length > 0);
+
+                            const steps = [
+                                { id: 'welcome', num: 1, label: 'Select Job', unlocked: true, completed: jobSelected },
+                                { id: 'cert', num: 2, label: 'Certificate Setup', unlocked: jobSelected, completed: certReady },
+                                { id: 'live', num: 3, label: 'Live Recording', unlocked: certReady, completed: hasData },
+                                { id: 'report', num: 4, label: 'Review & Finalize', unlocked: hasData, completed: false },
+                            ];
+
+                            return steps.map(step => {
+                                const isActive = activeTab === step.id;
+                                const cls = `workflow-step${isActive ? ' active' : ''}${step.completed ? ' completed' : ''}${!step.unlocked && !step.completed ? ' locked' : ''}`;
+                                return (
+                                    <button key={step.id} className={cls} onClick={() => {
+                                        if (step.id === 'cert') setActiveTab('cert');
+                                        else if (step.id === 'welcome') leaveCert(() => { setActiveTab('welcome'); setImportContext(null); });
+                                        else leaveCert(() => setActiveTab(step.id));
+                                    }}>
+                                        <span className="step-num">{step.completed ? '✓' : step.num}</span>
+                                        {step.label}
+                                    </button>
+                                );
+                            });
+                        })()}
+
+                        <div className="sidebar-divider"></div>
+                        <div className="sidebar-section-label">Tools</div>
+
                         <button className={`nav-btn ${activeTab === 'import' ? 'active' : ''}`} onClick={() => leaveCert(() => { if (activeJob) { triggerAppendData(activeJob); } else { setActiveTab('import'); setImportContext(null); } })}>Import CSV</button>
-                        <button className={`nav-btn ${activeTab === 'report' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('report'))}>Saved Projects / Reports</button>
-                        <button className={`nav-btn ${activeTab === 'cert' ? 'active' : ''}`} onClick={() => setActiveTab('cert')}>Certificate</button>
-                        <button className={`nav-btn ${activeTab === 'leaks' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('leaks'))}>Leak Logs{companionLeaks.length > 0 ? ` (${companionLeaks.length})` : ''}</button>
                         <button className={`nav-btn ${activeTab === 'companion' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('companion'))}>
                             📱 Companion{companionRunning ? ` (${companionClients})` : ''}
                         </button>
+                        <button className={`nav-btn ${activeTab === 'leaks' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('leaks'))}>💧 Leak Logs{companionLeaks.length > 0 ? ` (${companionLeaks.length})` : ''}</button>
+
                         <div className="flex-grow"></div>
-                        <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('settings'))}>Settings</button>
+                        <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('settings'))}>⚙️ Settings</button>
                     </div>
                 )}
                 <div className="content-area" style={isCertPreview ? { padding: 0, margin: 0, overflowY: 'auto' } : {}}>

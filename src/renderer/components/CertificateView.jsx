@@ -175,7 +175,8 @@ const buildDefaultFormData = () => ({
         description: '',
         accept: 'YES',
         testResults: 'PASS'
-    }))
+    })),
+    dynamicTests: []
 });
 
 const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit, promptAiOnArrival, onAiPromptResolved }) => {
@@ -184,7 +185,70 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const dataSets = job?.dataSets || [];
     const firstData = dataSets[0]?.data || [];
 
-    console.log("CertificateView Render:", { jobId, jobMetadataId: job?.id, draftCount: job?.metadata?.drafts?.length });
+    // --- Multi-certificate support ---
+    // Active certificate data lives in the top-level certData/certLayout/testSchema fields.
+    // The certificates array stores snapshots of inactive certificates.
+    const [activeCertIndex, setActiveCertIndex] = useState(job?.metadata?.activeCertIndex || 0);
+    const certificates = job?.metadata?.certificates || [];
+
+    const saveCurrentToSlot = (idx) => {
+        if (!onUpdateMetadata || !jobId) return;
+        const certs = [...(certificates.length > 0 ? certificates : [])];
+        while (certs.length <= idx) certs.push({ name: `Certificate ${certs.length + 1}` });
+        certs[idx] = {
+            ...certs[idx],
+            certData: job?.metadata?.certData || null,
+            certLayout: job?.metadata?.certLayout || 'crane-hook',
+            testSchema: job?.metadata?.testSchema || null,
+        };
+        onUpdateMetadata(jobId, { certificates: certs });
+    };
+
+    const addNewCertificate = () => {
+        if (!onUpdateMetadata || !jobId) return;
+        saveCurrentToSlot(activeCertIndex);
+        const certs = [...(certificates.length > 0 ? certificates : [])];
+        while (certs.length <= activeCertIndex) certs.push({ name: `Certificate ${certs.length + 1}`, certData: job?.metadata?.certData, certLayout: job?.metadata?.certLayout, testSchema: job?.metadata?.testSchema });
+        const newIdx = certs.length;
+        certs.push({ name: `Certificate ${newIdx + 1}`, certData: null, certLayout: 'crane-hook', testSchema: null });
+        const defaults = buildDefaultFormData();
+        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: newIdx, certData: defaults, certLayout: 'crane-hook', testSchema: null });
+        setActiveCertIndex(newIdx);
+        setFormData(defaults);
+        setCertLayoutState('crane-hook');
+        setTestSchema(null);
+        setCustomerSignature(null);
+        setAiMessages([]);
+    };
+
+    const switchCertificate = (idx) => {
+        if (idx === activeCertIndex || !onUpdateMetadata || !jobId) return;
+        saveCurrentToSlot(activeCertIndex);
+        const certs = [...(certificates.length > 0 ? certificates : [])];
+        while (certs.length <= activeCertIndex) certs.push({ name: `Certificate ${certs.length + 1}`, certData: job?.metadata?.certData, certLayout: job?.metadata?.certLayout, testSchema: job?.metadata?.testSchema });
+        if (idx >= certs.length) return;
+        const cert = certs[idx];
+        const certData = cert.certData || buildDefaultFormData();
+        const certLayout = cert.certLayout || 'crane-hook';
+        const schema = cert.testSchema || null;
+        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: idx, certData, certLayout, testSchema: schema });
+        setActiveCertIndex(idx);
+        setFormData(prev => ({ ...buildDefaultFormData(), ...certData }));
+        setCertLayoutState(certLayout);
+        setTestSchema(schema);
+        setCustomerSignature(null);
+        setAiMessages([]);
+    };
+
+    const renameCertificate = (idx, name) => {
+        if (!onUpdateMetadata || !jobId) return;
+        const certs = [...(certificates.length > 0 ? certificates : [{ name: 'Certificate 1' }])];
+        if (idx < certs.length) {
+            certs[idx] = { ...certs[idx], name };
+            onUpdateMetadata(jobId, { certificates: certs });
+        }
+    };
+
 
     const [formData, setFormData] = useState({
         soldTo: '',
@@ -299,7 +363,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             description: '',
             accept: 'YES',
             testResults: 'PASS'
-        }))
+        })),
+        dynamicTests: []
     });
 
     const [isPreview, setIsPreview] = useState(false);
@@ -347,6 +412,13 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const [emailBody, setEmailBody] = useState('');
     const [emailSending, setEmailSending] = useState(false);
     const [emailStatus, setEmailStatus] = useState(null); // { type: 'success'|'error', message }
+
+    const [testSchema, setTestSchema] = useState(job?.metadata?.testSchema || null);
+
+    const setTestSchemaAndPersist = (schema) => {
+        setTestSchema(schema);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { testSchema: schema });
+    };
 
     // --- Drag-and-Drop Section Reordering ---
     const dragItem = useRef(null);
@@ -437,6 +509,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         setShowAiPrompt(false);
         if (onAiPromptResolved) onAiPromptResolved();
     };
+
+    const hasAutoOpenedAi = useRef(false);
 
     useEffect(() => {
         const load = async () => {
@@ -530,7 +604,11 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 // Auto-fill from SharePoint job (live selection or cache lookup)
                 if (spJob) {
                     if (!current.projectRef) current.projectRef = spJob.QuoteNum || '';
-                    if (!current.soldTo) current.soldTo = spJob.LeadCompany || spJob.Customer || '';
+                    if (!current.soldTo) {
+                        const company = spJob.LeadCompany || spJob.Customer || '';
+                        const addr = spJob.CompanyAddress || '';
+                        current.soldTo = addr ? `${company}\n${addr}` : company;
+                    }
                     if (!current.customerPO) current.customerPO = spJob.PONumber || '';
                     if (!current.buyer) current.buyer = spJob.Customer || spJob.LeadName || '';
                     if (!current.facilityLocation) current.facilityLocation = spJob.ShipToAddress || spJob.Location || spJob.JobLocation || spJob.ShippingAddress || '';
@@ -763,7 +841,29 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
 
+    const buildEmptyDynamicTest = (schema) => {
+        if (!schema) return { accept: 'YES' };
+        const test = {};
+        for (const col of (schema.columns || [])) {
+            if (col.type === 'select' && col.options?.length) {
+                test[col.key] = col.options[0];
+            } else {
+                test[col.key] = '';
+            }
+        }
+        for (const group of (schema.groups || [])) {
+            if (group.toggleKey) test[group.toggleKey] = false;
+            for (const field of (group.fields || [])) {
+                test[field.key] = '';
+            }
+        }
+        return test;
+    };
+
     const buildEmptyTest = (layout) => {
+        if (layout === 'dynamic') {
+            return buildEmptyDynamicTest(testSchema);
+        }
         if (layout === 'spreader-beam') {
             return {
                 loadType: 'Static',
@@ -833,6 +933,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         layout === 'spreader-beam' ? 'spreaderTests'
         : layout === 'steel-weight' ? 'steelWeightTests'
         : layout === 'gangway' ? 'gangwayTests'
+        : layout === 'dynamic' ? 'dynamicTests'
         : 'tests'
     );
 
@@ -869,6 +970,14 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         const newTests = [...(formData.gangwayTests || [])];
         newTests[testIndex] = { ...newTests[testIndex], [field]: value };
         const newFormData = { ...formData, gangwayTests: newTests };
+        setFormData(newFormData);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
+    };
+
+    const handleDynamicTestInput = (testIndex, field, value) => {
+        const newTests = [...(formData.dynamicTests || [])];
+        newTests[testIndex] = { ...newTests[testIndex], [field]: value };
+        const newFormData = { ...formData, dynamicTests: newTests };
         setFormData(newFormData);
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
@@ -977,6 +1086,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (!window.confirm('Reset the certificate editor to defaults?\n\nThis will clear all customer info, instruments, hooks, tests, photos, and signatures. Saved drafts are preserved.')) return;
         const defaults = buildDefaultFormData();
         setCertLayout('crane-hook');
+        setTestSchemaAndPersist(null);
         setCustomerSignature(null);
         setFormData(defaults);
         if (onUpdateMetadata && jobId) {
@@ -991,6 +1101,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (!window.confirm(`Load template "${template.name}"?\n\nThis will replace the current customer info, instruments, procedure, and tests. Photos and drafts are preserved.`)) return;
 
         if (template.certLayout) setCertLayout(template.certLayout);
+        if (template.testSchema) setTestSchemaAndPersist(template.testSchema);
 
         setFormData(prev => {
             const merged = {
@@ -1005,6 +1116,12 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             }
             return merged;
         });
+    };
+
+    const handleAiQuickGenerate = () => {
+        if (!aiDescription.trim()) return;
+        setAiDescription(prev => prev.trim() + '\n\n[QUICK GENERATE — skip questions, generate the certificate immediately with best guesses for any missing details]');
+        setTimeout(() => handleAiGenerate(), 0);
     };
 
     const handleAiGenerate = async () => {
@@ -1022,31 +1139,33 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             const result = await getElectronAPI().generateCertTemplate(
                 userMsg,
                 isFollowUp ? newMessages : null,
-                isFollowUp ? { certLayout, formData } : null
+                isFollowUp ? { certLayout, formData, testSchema } : null
             );
-            if (result.certLayout) setCertLayout(result.certLayout);
-            setFormData(prev => {
-                // Non-destructive merge: only apply AI values that are actually
-                // populated, so blank fields the AI returns for things it doesn't
-                // know never wipe existing certificate data.
-                const merged = { ...prev };
-                if (result.formData) {
-                    for (const [key, val] of Object.entries(result.formData)) {
-                        if (val === undefined || val === null) continue;
-                        if (typeof val === 'string' && val.trim() === '') continue;
-                        if (Array.isArray(val) && val.length === 0) continue;
-                        merged[key] = val;
+            if (result.ready === false) {
+                setAiMessages(prev => [...prev, { role: 'assistant', content: result.message }]);
+            } else {
+                if (result.certLayout) setCertLayout(result.certLayout);
+                if (result.testSchema) setTestSchemaAndPersist(result.testSchema);
+                setFormData(prev => {
+                    const merged = { ...prev };
+                    if (result.formData) {
+                        for (const [key, val] of Object.entries(result.formData)) {
+                            if (val === undefined || val === null) continue;
+                            if (typeof val === 'string' && val.trim() === '') continue;
+                            if (Array.isArray(val) && val.length === 0) continue;
+                            merged[key] = val;
+                        }
                     }
-                }
-                merged.photos = prev.photos || [];
-                merged.graphPageBreaks = prev.graphPageBreaks || {};
-                merged.sectionOrder = prev.sectionOrder;
-                if (onUpdateMetadata && jobId) {
-                    onUpdateMetadata(jobId, { certData: merged });
-                }
-                return merged;
-            });
-            setAiMessages(prev => [...prev, { role: 'assistant', content: result.summary || 'Template updated.' }]);
+                    merged.photos = prev.photos || [];
+                    merged.graphPageBreaks = prev.graphPageBreaks || {};
+                    merged.sectionOrder = prev.sectionOrder;
+                    if (onUpdateMetadata && jobId) {
+                        onUpdateMetadata(jobId, { certData: merged });
+                    }
+                    return merged;
+                });
+                setAiMessages(prev => [...prev, { role: 'assistant', content: result.summary || 'Certificate generated.' }]);
+            }
         } catch (err) {
             setAiError(err.message || 'Failed to generate template');
             setAiMessages(prev => prev.slice(0, -1));
@@ -1117,10 +1236,24 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         }
     };
 
-    const showPreview = () => {
-        // Sync cert form data to job metadata when previewing (deferred from per-keystroke)
+    const showPreview = async () => {
         if (onUpdateMetadata) {
             onUpdateMetadata(jobId, { certData: formData });
+        }
+        if (allChartStats.length > 0 || (formData.photos && formData.photos.length > 0)) {
+            try {
+                const metrics = {
+                    chartCount: allChartStats.length,
+                    photoCount: (formData.photos || []).length,
+                    chartDataPoints: allChartStats.map(s => s?.chartData?.labels?.length || 0),
+                    chartNames: dataSets.map(ds => ds?.name || ''),
+                    hasPhotos: (formData.photos || []).length > 0,
+                    numTests: parseInt(formData.numTests) || 0,
+                    certLayout
+                };
+                const result = await getElectronAPI().optimizeCertLayout(metrics);
+                setAiLayoutOverrides(result);
+            } catch (_) {}
         }
         setIsPreview(true);
         if (onPreviewModeChange) onPreviewModeChange(true);
@@ -1341,7 +1474,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                 <div className="cert-box"><div className="label-top">Project Mgr.</div><div className="content-center">{formData.projectMgr}</div></div>
                                                 <div className="cert-box"><div className="label-top">Certificate No.</div><div className="content-center">{formData.certNo}</div></div>
                                             </div>
-                                            <div className="cert-row-6" style={{ flexDirection: 'column', border: 'none', borderTop: '1.5px solid #000', marginTop: '12px' }}>
+                                            <div className="cert-row-6" style={{ flexDirection: 'column', border: 'none', borderTop: '1.5px solid #000', marginTop: '8px' }}>
                                                 <div className="cert-row-5" style={{ borderBottom: '1px solid #000', backgroundColor: '#f9f9f9' }}>
                                                     <div className="cert-box"><div className="label-top">Instrument</div></div>
                                                     <div className="cert-box"><div className="label-top">Capacity</div></div>
@@ -1360,7 +1493,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                 ))}
                                             </div>
                                             {(formData.referenceStandards?.trim() || formData.procedureSummary?.trim()) && (
-                                                <div style={{ gridColumn: '1 / -1', borderTop: '1.5px solid #000', marginTop: '10px', paddingTop: '8px' }}>
+                                                <div style={{ gridColumn: '1 / -1', borderTop: '1.5px solid #000', marginTop: '6px', paddingTop: '4px' }}>
                                                     {formData.referenceStandards?.trim() && (
                                                         <div style={{ fontSize: '0.75rem', marginBottom: '4px' }}>
                                                             <strong>Reference Standards:</strong> {formData.referenceStandards}
@@ -1623,6 +1756,171 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                 </tbody>
                                             </table>
                                         );
+                                    } else if (certLayout === 'dynamic' && testSchema) {
+                                        const dynRows = (formData.dynamicTests || []).slice(0, parseInt(formData.numTests));
+                                        const lo = testSchema.layout || {};
+                                        const isDetailed = lo.rowStyle === 'detailed';
+                                        const isExpanded = lo.descriptionPlacement === 'expanded';
+                                        const testLabel = lo.testLabel || 'Item';
+                                        const titleCol = (testSchema.columns || []).find(c => c.role === 'title');
+                                        const subtitleCol = (testSchema.columns || []).find(c => c.role === 'subtitle');
+                                        const tableCols = (testSchema.columns || []).filter(c => c.role !== 'title' && c.role !== 'subtitle');
+                                        const conditionalVisible = {};
+                                        tableCols.forEach(col => {
+                                            if (col.showIf === 'any') {
+                                                conditionalVisible[col.key] = dynRows.some(t => t[col.key] && String(t[col.key]).trim());
+                                            } else {
+                                                conditionalVisible[col.key] = true;
+                                            }
+                                        });
+                                        const visibleCols = tableCols.filter(c => conditionalVisible[c.key]);
+                                        const groupTableCols = [];
+                                        (testSchema.groups || []).forEach(group => {
+                                            const anyToggled = dynRows.some(t => t[group.toggleKey]);
+                                            if (anyToggled) {
+                                                (group.fields || []).filter(f => f.addToTable).forEach(f => {
+                                                    groupTableCols.push({ ...f, _groupKey: group.key });
+                                                });
+                                            }
+                                        });
+                                        const totalCols = 1 + 1 + visibleCols.length + groupTableCols.length;
+                                        const baseFontSize = isDetailed ? '0.82rem' : '0.78rem';
+                                        const cellPad = isDetailed ? '10px' : '6px';
+
+                                        const groupByKey = lo.groupBy || null;
+                                        let lastGroupVal = null;
+
+                                        const renderDataCell = (col, test) => {
+                                            const val = test[col.key];
+                                            const display = val != null && String(val).trim() ? String(val) : '--';
+                                            const isForce = col.format === 'force';
+                                            const isAccept = col.format === 'accept';
+                                            return (
+                                                <td key={col.key}
+                                                    className={isForce ? 'force-val' : isAccept ? 'accept-val' : ''}
+                                                    style={{
+                                                        verticalAlign: 'middle', paddingTop: cellPad, fontSize: baseFontSize,
+                                                        color: isAccept ? (val === 'YES' ? '#006600' : '#cc0000') : undefined
+                                                    }}>
+                                                    {display}
+                                                </td>
+                                            );
+                                        };
+
+                                        content = (
+                                            <table className="cert-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th style={{ width: '32px' }}>{testLabel}</th>
+                                                        <th>{titleCol?.label || 'Equipment / Description'}</th>
+                                                        {!isExpanded && subtitleCol && <th style={{ fontSize: '0.65rem' }}>Details</th>}
+                                                        {visibleCols.map(col => (
+                                                            <th key={col.key} style={{ width: col.width || '78px', fontSize: col.width && parseInt(col.width) < 60 ? '0.65rem' : undefined }}>{col.label}</th>
+                                                        ))}
+                                                        {groupTableCols.map(col => (
+                                                            <th key={col.key} style={{ width: col.tableWidth || '82px', fontSize: '0.65rem' }}>{col.tableLabel || col.label}</th>
+                                                        ))}
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr>
+                                                        <td colSpan={totalCols + (!isExpanded && subtitleCol ? 1 : 0)} className="text-left" style={{ paddingBottom: '8px' }}>
+                                                            <div style={{ marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                                <strong style={{ color: '#555' }}>Test Type:</strong> {testSchema.testType || 'Load Test'}
+                                                            </div>
+                                                            {(testSchema.headerFields || []).length > 0 && (
+                                                                <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', fontSize: '0.75rem' }}>
+                                                                    {testSchema.headerFields.map(hf => (
+                                                                        formData[hf.key] ? <div key={hf.key}><strong style={{ color: '#555' }}>{hf.label}:</strong> {formData[hf.key]}</div> : null
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                    {dynRows.map((test, index) => {
+                                                        const rows = [];
+                                                        if (groupByKey && test[groupByKey] !== lastGroupVal) {
+                                                            lastGroupVal = test[groupByKey];
+                                                            rows.push(
+                                                                <tr key={`grp-${index}`}>
+                                                                    <td colSpan={totalCols + (!isExpanded && subtitleCol ? 1 : 0)}
+                                                                        style={{ background: '#1a3a6c', color: '#fff', fontWeight: 700, fontSize: '0.75rem', padding: '4px 8px', letterSpacing: '0.5px' }}>
+                                                                        {lastGroupVal}
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        }
+                                                        rows.push(
+                                                            <tr key={index}>
+                                                                <td style={{ verticalAlign: 'top', paddingTop: cellPad }}>{index + 1}</td>
+                                                                <td className="text-left" style={{ paddingTop: cellPad, paddingBottom: cellPad }}>
+                                                                    {titleCol && (
+                                                                        <div className="font-bold" style={{ fontSize: isDetailed ? '0.88rem' : '0.82rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: isExpanded ? '2px' : '4px', lineHeight: '1.15' }}>
+                                                                            {test[titleCol.key] || 'Equipment under test'}
+                                                                        </div>
+                                                                    )}
+                                                                    {!isExpanded && subtitleCol && test[subtitleCol.key] && (
+                                                                        <div style={{ fontSize: '0.7rem', marginTop: '2px', fontStyle: 'italic', lineHeight: '1.25' }}>
+                                                                            {test[subtitleCol.key]}
+                                                                        </div>
+                                                                    )}
+                                                                </td>
+                                                                {!isExpanded && subtitleCol && (
+                                                                    <td className="text-left" style={{ verticalAlign: 'top', paddingTop: cellPad, fontSize: '0.68rem', fontStyle: 'italic', lineHeight: '1.25', maxWidth: '180px' }}>
+                                                                        {test[subtitleCol.key] || ''}
+                                                                    </td>
+                                                                )}
+                                                                {visibleCols.map(col => renderDataCell(col, test))}
+                                                                {groupTableCols.map(col => {
+                                                                    const group = (testSchema.groups || []).find(g => g.key === col._groupKey);
+                                                                    const toggled = group && test[group.toggleKey];
+                                                                    return (
+                                                                        <td key={col.key} className="force-val" style={{ verticalAlign: 'middle', paddingTop: cellPad, fontSize: baseFontSize }}>
+                                                                            {toggled && test[col.key] ? test[col.key] : '--'}
+                                                                        </td>
+                                                                    );
+                                                                })}
+                                                            </tr>
+                                                        );
+                                                        if (isExpanded && subtitleCol && test[subtitleCol.key]) {
+                                                            rows.push(
+                                                                <tr key={`desc-${index}`}>
+                                                                    <td></td>
+                                                                    <td colSpan={totalCols + (!isExpanded && subtitleCol ? 1 : 0) - 1} className="text-left"
+                                                                        style={{ paddingTop: '2px', paddingBottom: cellPad, fontSize: '0.7rem', fontStyle: 'italic', lineHeight: '1.3', borderBottom: '0.5px solid #ddd' }}>
+                                                                        {test[subtitleCol.key]}
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        }
+                                                        return rows;
+                                                    })}
+                                                    {lo.showSummary && lo.summaryColumns?.length > 0 && (
+                                                        <tr style={{ borderTop: '2px solid #1a3a6c', fontWeight: 700 }}>
+                                                            <td></td>
+                                                            <td className="text-left" style={{ fontSize: baseFontSize, color: '#1a3a6c' }}>SUMMARY</td>
+                                                            {!isExpanded && subtitleCol && <td></td>}
+                                                            {visibleCols.map(col => {
+                                                                const sc = lo.summaryColumns.find(s => s.key === col.key);
+                                                                if (!sc) return <td key={col.key}></td>;
+                                                                let val;
+                                                                const nums = dynRows.map(t => parseFloat(String(t[col.key] || '').replace(/,/g, ''))).filter(n => !isNaN(n));
+                                                                if (sc.operation === 'sum') val = nums.reduce((a, b) => a + b, 0);
+                                                                else if (sc.operation === 'max') val = nums.length ? Math.max(...nums) : 0;
+                                                                else if (sc.operation === 'count') val = dynRows.length;
+                                                                else val = nums.reduce((a, b) => a + b, 0);
+                                                                return (
+                                                                    <td key={col.key} className="force-val" style={{ fontSize: baseFontSize, color: '#1a3a6c' }}>
+                                                                        {sc.label ? `${sc.label}: ` : ''}{val != null ? val.toLocaleString() : '--'}
+                                                                    </td>
+                                                                );
+                                                            })}
+                                                            {groupTableCols.map(col => <td key={col.key}></td>)}
+                                                        </tr>
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        );
                                     } else {
                                         content = (
                                             <table className="cert-table">
@@ -1641,8 +1939,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                 </thead>
                                                 <tbody>
                                                     <tr>
-                                                        <td colSpan={4 + (formData.hooks || []).length + 2} className="text-left" style={{ paddingBottom: '8px' }}>
-                                                            <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '4px', fontSize: '0.75rem' }}>
+                                                        <td colSpan={4 + (formData.hooks || []).length + 2} className="text-left" style={{ paddingBottom: '4px' }}>
+                                                            <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: '15px', rowGap: '2px', marginBottom: '2px', fontSize: '0.75rem' }}>
                                                                 <div><strong style={{ color: '#555' }}>Crane Manufacturer:</strong> {formData.equipmentManufacturer || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Crane S/N:</strong> {formData.equipmentSerial || 'N/A'}</div>
                                                                 <div><strong style={{ color: '#555' }}>Crane WLL:</strong> {formData.equipmentWll || 'N/A'}</div>
@@ -1654,26 +1952,26 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                         .slice(0, parseInt(formData.numTests))
                                                         .map((test, index) => (
                                                             <tr key={index}>
-                                                                <td style={{ verticalAlign: 'top', paddingTop: '8px' }}>{index + 1}</td>
-                                                                <td className="text-left" style={{ paddingTop: '8px', paddingBottom: '8px' }}>
-                                                                    <div className="font-bold" style={{ fontSize: '0.95rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '4px' }}>
+                                                                <td style={{ verticalAlign: 'top', paddingTop: '5px' }}>{index + 1}</td>
+                                                                <td className="text-left" style={{ paddingTop: '5px', paddingBottom: '5px' }}>
+                                                                    <div className="font-bold" style={{ fontSize: '0.95rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '3px' }}>
                                                                         {test.itemDescription || formData.equipmentTested}
                                                                     </div>
-                                                                    <div style={{ fontSize: '0.75rem', marginTop: '2px' }}>
+                                                                    <div style={{ fontSize: '0.75rem', marginTop: '1px' }}>
                                                                         <strong>Type:</strong> {test.loadType} | <strong>TEST LOAD:</strong> {test.wllPercentage || '100%'} WLL
                                                                     </div>
                                                                 </td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.localTime}</td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '8px' }}>{test.testDuration}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '5px' }}>{test.localTime}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '5px' }}>{test.testDuration}</td>
                                                                 {(formData.hooks || []).map((hook, hIdx) => {
                                                                     const force = test.hookData && test.hookData[hIdx]?.measuredForce;
                                                                     return (
-                                                                        <td key={hIdx} className="force-val" style={{ fontSize: '0.85rem', verticalAlign: 'middle', paddingTop: '8px' }}>
+                                                                        <td key={hIdx} className="force-val" style={{ fontSize: '0.85rem', verticalAlign: 'middle', paddingTop: '5px' }}>
                                                                             {force && String(force).trim() ? `${force} lbs` : '--'}
                                                                         </td>
                                                                     );
                                                                 })}
-                                                                <td className="force-val" style={{ fontSize: '0.85rem', fontWeight: 700, verticalAlign: 'middle', paddingTop: '8px' }}>
+                                                                <td className="force-val" style={{ fontSize: '0.85rem', fontWeight: 700, verticalAlign: 'middle', paddingTop: '5px' }}>
                                                                     {(() => {
                                                                         const total = (formData.hooks || []).reduce((sum, _, hIdx) => {
                                                                             const raw = test.hookData && test.hookData[hIdx]?.measuredForce;
@@ -1683,7 +1981,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                         return total > 0 ? `${total.toLocaleString()} lbs` : '--';
                                                                     })()}
                                                                 </td>
-                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '8px' }}>{test.accept}</td>
+                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '5px' }}>{test.accept}</td>
                                                             </tr>
                                                         ))}
                                                 </tbody>
@@ -1694,7 +1992,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 case 'footer':
                                     content = (
                                         <>
-                                            <div className="cert-footer-grid" style={{ marginTop: '8px' }}>
+                                            <div className="cert-footer-grid" style={{ marginTop: '3px' }}>
                                                 <div className="cert-box">
                                                     <div className="label-top">Project Manager:</div>
                                                     <div className="content-val">{formData.projectMgr}</div>
@@ -1974,109 +2272,78 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
     return (
         <div className="certificate-form-container">
-            <div className="cert-editor-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px', background: 'var(--bg-card)', padding: '20px', borderRadius: '10px', border: '1px solid var(--border)' }}>
-                <div>
-                    <h2 style={{ margin: 0, color: 'var(--yellow-accent)' }}>Certificate Editor</h2>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: '8px' }}>
-                        <select
-                            value={certLayout}
-                            onChange={(e) => setCertLayout(e.target.value)}
-                            className="control-select"
-                            style={{ fontSize: '0.9rem', padding: '6px 12px', minWidth: '220px' }}
-                        >
-                            <option value="crane-hook">Standard Crane Hook</option>
-                            <option value="spreader-beam">Spreader Beam</option>
-                            <option value="steel-weight">Steel Weight Test</option>
-                            <option value="gangway">Accommodation Ladder / Gangway (Flow Meter)</option>
-                        </select>
-                        <select
-                            onChange={(e) => { handleLoadTemplate(e.target.value); e.target.value = ''; }}
-                            className="control-select"
-                            style={{ fontSize: '0.9rem', padding: '6px 12px', minWidth: '240px' }}
-                            title="Load a pre-defined certificate template"
-                            defaultValue=""
-                        >
-                            <option value="">📋 Load Template...</option>
-                            {certificateTemplates.map(t => (
-                                <option key={t.id} value={t.id} title={t.description}>{t.name}</option>
-                            ))}
-                        </select>
+            {/* Certificate Tabs */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                {(() => {
+                    const tabs = certificates.length > 0
+                        ? certificates
+                        : [{ name: 'Certificate 1' }];
+                    return tabs.map((cert, idx) => (
                         <button
-                            onClick={() => setShowAiGenerator(true)}
-                            className="action-btn secondary small"
-                            title="Describe your test and let AI generate a certificate template"
-                            style={{ fontSize: '0.85rem', padding: '6px 14px', whiteSpace: 'nowrap' }}
-                        >
-                            🤖 AI Generate
-                        </button>
-                        <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                            Job: <strong style={{ color: 'white' }}>{job?.metadata?.jobNumber || 'N/A'}</strong>
-                            <span style={{ marginLeft: '10px', fontSize: '0.7rem', opacity: 0.6 }}>ID: {jobId}</span>
-                            <span style={{ marginLeft: '10px', padding: '2px 6px', background: 'var(--accent)', borderRadius: '4px', fontSize: '0.7rem' }}>
-                                {job?.metadata?.drafts?.length || 0} Drafts
-                            </span>
-                        </p>
-                    </div>
-                </div>
-                <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
-                    <div className="draft-management" style={{ display: 'flex', gap: '10px', alignItems: 'center', borderRight: '1px solid var(--border)', paddingRight: '15px' }}>
-                        <button
-                            onClick={handleSaveDraft}
-                            className="action-btn secondary small"
-                            title="Save current progress as a new draft checkpoint"
-                            style={{ cursor: 'pointer', position: 'relative', zIndex: 10 }}
-                        >
-                            💾 Save as Draft
-                        </button>
-                        <select
-                            className="draft-select"
-                            onChange={(e) => {
-                                const idx = e.target.value;
-                                if (idx !== "") handleLoadDraft(job.metadata.drafts[idx]);
-                                e.target.value = ""; // Reset
+                            key={idx}
+                            onClick={() => switchCertificate(idx)}
+                            onDoubleClick={() => {
+                                const name = prompt('Rename certificate:', cert.name || `Certificate ${idx + 1}`);
+                                if (name) renameCertificate(idx, name);
                             }}
-                            style={{ background: 'var(--bg-dark)', color: 'white', border: '1px solid var(--border)', padding: '5px 10px', borderRadius: '4px', cursor: 'pointer' }}
+                            style={{
+                                padding: '6px 14px',
+                                fontSize: '0.8rem',
+                                fontWeight: idx === activeCertIndex ? 700 : 400,
+                                background: idx === activeCertIndex ? 'var(--yellow-accent)' : 'var(--bg-elevated)',
+                                color: idx === activeCertIndex ? '#000' : 'var(--text-secondary)',
+                                border: `1px solid ${idx === activeCertIndex ? 'var(--yellow-accent)' : 'var(--border)'}`,
+                                borderRadius: '6px 6px 0 0',
+                                cursor: 'pointer',
+                            }}
                         >
-                            <option value="">-- Load Saved Draft --</option>
-                            {job?.metadata?.drafts?.map((d, i) => (
-                                <option key={i} value={i}>{d.name} ({new Date(d.timestamp).toLocaleDateString()})</option>
-                            ))}
-                        </select>
-                    </div>
+                            {cert.name || `Certificate ${idx + 1}`}
+                        </button>
+                    ));
+                })()}
+                <button
+                    onClick={addNewCertificate}
+                    style={{ padding: '6px 10px', fontSize: '0.85rem', background: 'transparent', border: '1px dashed var(--border)', borderRadius: '6px 6px 0 0', color: 'var(--text-secondary)', cursor: 'pointer' }}
+                    title="Add another certificate to this job"
+                >
+                    +
+                </button>
+            </div>
+
+            <div className="cert-editor-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', background: 'var(--bg-card)', padding: '14px 20px', borderRadius: '0 10px 10px 10px', border: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <button
+                        onClick={() => setShowAiGenerator(true)}
+                        className="action-btn"
+                        style={{ fontSize: '0.85rem', padding: '8px 16px', whiteSpace: 'nowrap', background: '#1a3a6c' }}
+                    >
+                        🤖 AI Generate
+                    </button>
+                    <select
+                        value={certLayout}
+                        onChange={(e) => setCertLayout(e.target.value)}
+                        className="control-select"
+                        style={{ fontSize: '0.82rem', padding: '6px 10px' }}
+                    >
+                        <option value="crane-hook">Crane Hook</option>
+                        <option value="spreader-beam">Spreader Beam</option>
+                        <option value="steel-weight">Steel Weight</option>
+                        <option value="gangway">Gangway</option>
+                        {testSchema && <option value="dynamic">{testSchema.testType || 'Dynamic'}</option>}
+                    </select>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <button
                         onClick={handleResetForm}
-                        className="action-btn secondary"
-                        title="Reset entire certificate editor to defaults"
-                        style={{ borderColor: '#cc3333', color: '#ff6b6b' }}
+                        className="action-btn secondary small"
+                        title="Reset certificate to defaults"
+                        style={{ color: '#ff6b6b', borderColor: '#cc3333', fontSize: '0.78rem', padding: '5px 10px' }}
                     >
-                        ♻️ Reset
+                        Reset
                     </button>
-                    <button onClick={showPreview} className="action-btn large">
-                        👁️ Preview Certificate
+                    <button onClick={showPreview} className="action-btn" style={{ fontSize: '0.85rem', padding: '8px 18px' }}>
+                        Preview
                     </button>
-                    {(allChartStats.length > 0 || (formData.photos && formData.photos.length > 0)) && (
-                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                            <button
-                                onClick={handleAiLayout}
-                                className="action-btn secondary small"
-                                disabled={aiLayoutLoading}
-                                title="Use AI to optimize the graph and photo layout on page 2"
-                                style={{ fontSize: '0.8rem', padding: '5px 12px', whiteSpace: 'nowrap' }}
-                            >
-                                {aiLayoutLoading ? '🔄 Optimizing...' : '🤖 AI Layout'}
-                            </button>
-                            {aiLayoutOverrides && (
-                                <button
-                                    onClick={() => setAiLayoutOverrides(null)}
-                                    className="action-btn secondary small"
-                                    title="Reset to automatic layout"
-                                    style={{ fontSize: '0.75rem', padding: '4px 8px', color: '#ff6b6b', borderColor: '#cc3333' }}
-                                >
-                                    Reset
-                                </button>
-                            )}
-                        </div>
-                    )}
                 </div>
             </div>
 
@@ -2111,6 +2378,16 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 <label>Vessel Class</label>
                                 <input name="vesselClass" value={formData.vesselClass || ''} onChange={handleInput} placeholder="e.g. ABS A1, DNV +1A1, USCG..." />
                             </div>
+                        </div>
+                    )}
+                    {certLayout === 'dynamic' && testSchema?.headerFields?.length > 0 && (
+                        <div className="form-row">
+                            {testSchema.headerFields.map(hf => (
+                                <div className="form-group" key={hf.key}>
+                                    <label>{hf.label}</label>
+                                    <input name={hf.key} value={formData[hf.key] || ''} onChange={handleInput} placeholder={hf.label + '...'} />
+                                </div>
+                            ))}
                         </div>
                     )}
                 </section>
@@ -2435,7 +2712,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     <button className="remove-photo-btn" onClick={() => removePhoto(index)}>✕</button>
                                 </div>
                             ))}
-                            {(!formData.photos || formData.photos.length < 4) && (
+                            {(!formData.photos || formData.photos.length < 10) && (
                                 <label className="add-photo-card">
                                     <input type="file" accept="image/*" multiple onChange={onPhotoChange} style={{ display: 'none' }} />
                                     <div className="add-icon">+</div>
@@ -2443,7 +2720,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 </label>
                             )}
                         </div>
-                        <p className="helper-text">Add up to 4 photos to include in the certificate.</p>
+                        <p className="helper-text">Add up to 10 photos to include in the certificate.</p>
                     </div>
                 </section>
 
@@ -3023,6 +3300,120 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 );
             })}
 
+            {/* Dynamic Test Records */}
+            {certLayout === 'dynamic' && testSchema && (formData.dynamicTests || []).slice(0, parseInt(formData.numTests)).map((test, index) => {
+                const titleCol = (testSchema.columns || []).find(c => c.role === 'title');
+                const subtitleCol = (testSchema.columns || []).find(c => c.role === 'subtitle');
+                const fieldCols = (testSchema.columns || []).filter(c => c.role !== 'title' && c.role !== 'subtitle');
+                const selectCols = fieldCols.filter(c => c.type === 'select');
+                const textCols = fieldCols.filter(c => c.type !== 'select' && c.type !== 'textarea');
+                const textareaCols = fieldCols.filter(c => c.type === 'textarea');
+                return (
+                <section className="form-section" key={`dyn-${index}`} style={{ borderLeft: '4px solid #8957e5' }}>
+                    <div className="section-header-row">
+                        <h3 style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: 0 }}>
+                            Test Record #{index + 1}
+                            <span style={{ fontSize: '0.7rem', background: '#8957e5', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontWeight: 700 }}>{testSchema.testType || 'DYNAMIC'}</span>
+                        </h3>
+                        {parseInt(formData.numTests) > 1 && (
+                            <button onClick={() => removeTestRecord(index)} className="job-remove-btn" title="Remove this test record">✕</button>
+                        )}
+                    </div>
+                    {titleCol && (
+                        <div className="form-row">
+                            <div className="form-group" style={{ flex: 2 }}>
+                                <label>{titleCol.label}</label>
+                                <input
+                                    value={test[titleCol.key] || ''}
+                                    onChange={(e) => handleDynamicTestInput(index, titleCol.key, e.target.value)}
+                                    placeholder={titleCol.label + '...'}
+                                />
+                            </div>
+                            {selectCols.slice(0, 2).map(col => (
+                                <div className="form-group" key={col.key}>
+                                    <label>{col.label}</label>
+                                    <select value={test[col.key] || col.options?.[0] || ''} onChange={(e) => handleDynamicTestInput(index, col.key, e.target.value)}>
+                                        {(col.options || []).map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                    </select>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    <div className="form-row">
+                        {textCols.map(col => (
+                            <div className="form-group" key={col.key}>
+                                <label>{col.label}</label>
+                                <input
+                                    type={col.type === 'number' ? 'number' : 'text'}
+                                    value={test[col.key] || ''}
+                                    onChange={(e) => handleDynamicTestInput(index, col.key, e.target.value)}
+                                    placeholder={col.label + '...'}
+                                />
+                            </div>
+                        ))}
+                        {selectCols.slice(2).map(col => (
+                            <div className="form-group" key={col.key}>
+                                <label>{col.label}</label>
+                                <select value={test[col.key] || col.options?.[0] || ''} onChange={(e) => handleDynamicTestInput(index, col.key, e.target.value)}>
+                                    {(col.options || []).map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                </select>
+                            </div>
+                        ))}
+                    </div>
+                    {textareaCols.map(col => (
+                        <div className="form-group" key={col.key} style={col !== textareaCols[0] ? { marginTop: '8px' } : undefined}>
+                            <label>{col.label}</label>
+                            <textarea
+                                value={test[col.key] || ''}
+                                onChange={(e) => handleDynamicTestInput(index, col.key, e.target.value)}
+                                rows="2"
+                                placeholder={col.label + '...'}
+                            />
+                        </div>
+                    ))}
+                    {subtitleCol && !textareaCols.find(c => c.key === subtitleCol.key) && (
+                        <div className="form-group">
+                            <label>{subtitleCol.label}</label>
+                            <textarea
+                                value={test[subtitleCol.key] || ''}
+                                onChange={(e) => handleDynamicTestInput(index, subtitleCol.key, e.target.value)}
+                                rows="2"
+                                placeholder={subtitleCol.label + '...'}
+                            />
+                        </div>
+                    )}
+                    {(testSchema.groups || []).map(group => (
+                        <div key={group.key} style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: `1px solid ${group.color || 'var(--border)'}` }}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontSize: '0.85rem', color: group.color || 'var(--accent)', fontWeight: 700, marginBottom: test[group.toggleKey] ? '10px' : 0 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!test[group.toggleKey]}
+                                    onChange={(e) => handleDynamicTestInput(index, group.toggleKey, e.target.checked)}
+                                    style={{ width: '16px', height: '16px' }}
+                                />
+                                {group.toggleLabel || group.label}
+                            </label>
+                            {test[group.toggleKey] && (
+                                <div className="form-row">
+                                    {(group.fields || []).map(field => (
+                                        <div className="form-group" key={field.key} style={{ flex: 1 }}>
+                                            <label>{field.label}</label>
+                                            <input
+                                                type={field.type === 'number' ? 'number' : 'text'}
+                                                value={test[field.key] || ''}
+                                                onChange={(e) => handleDynamicTestInput(index, field.key, e.target.value)}
+                                                placeholder={field.label + '...'}
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    ))}
+                </section>
+                );
+            })}
+
             <div className="form-actions mt-4" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '20px', padding: '40px 0', borderTop: '1px solid var(--border)', flexWrap: 'wrap' }}>
                 <button
                     onClick={addTestRecord}
@@ -3165,6 +3556,17 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 >
                                     {aiMessages.length > 0 ? 'Done' : 'Cancel'}
                                 </button>
+                                {aiMessages.length === 0 && (
+                                    <button
+                                        className="action-btn"
+                                        onClick={handleAiQuickGenerate}
+                                        disabled={aiLoading || !aiDescription.trim()}
+                                        style={{ background: '#2d6a4f' }}
+                                        title="Generate immediately without asking questions"
+                                    >
+                                        ⚡ Quick Generate
+                                    </button>
+                                )}
                                 <button
                                     className="action-btn"
                                     onClick={handleAiGenerate}

@@ -74,6 +74,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.on('companion-leak-received', handler);
         return () => ipcRenderer.removeListener('companion-leak-received', handler);
     },
+    onCompanionMarkerToggle: (callback) => {
+        const handler = (_event, phase) => callback(phase);
+        ipcRenderer.on('companion-marker-toggle', handler);
+        return () => ipcRenderer.removeListener('companion-marker-toggle', handler);
+    },
 
     // Certificate Registry
     certNextNumber: () => ipcRenderer.invoke('cert:nextNumber'),

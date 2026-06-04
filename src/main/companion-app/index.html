@@ -132,6 +132,24 @@
         .stat-value { font-size: 1.1rem; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
         .stat-value.yellow { color: var(--yellow); }
 
+        /* Test Phase Buttons */
+        .test-controls { padding: 8px 12px; display: flex; gap: 8px; }
+        .test-btn {
+            flex: 1; padding: 12px 8px; border-radius: 10px; border: none;
+            font-weight: 700; font-size: 0.8rem; cursor: pointer; color: #fff;
+            transition: opacity 0.2s;
+        }
+        .test-btn:active { opacity: 0.7; }
+        .test-btn:disabled { opacity: 0.4; cursor: default; }
+        .test-btn.func-start { background: #0ea5e9; }
+        .test-btn.func-end { background: #ef4444; }
+        .test-btn.static-start { background: #8b5cf6; }
+        .test-btn.static-end { background: #ef4444; }
+
+        /* Live Chart */
+        .chart-wrap { padding: 0 12px 8px; }
+        .chart-canvas { width: 100%; height: 160px; border-radius: 10px; background: var(--card); border: 1px solid var(--border); }
+
         /* Tabs */
         .tabs {
             display: flex;
@@ -450,8 +468,10 @@
                 case 'liveData':
                     state.devices[msg.data.tag] = msg.data;
                     lastPacketTimes[msg.data.tag] = Date.now();
+                    pushChartPoint(msg.data.tag, msg.data.value);
                     recalcTotal();
                     if (!state.leakDraft) render();
+                    drawChart();
                     break;
                 case 'overload':
                     state.overloadTags = msg.data.tags || [];
@@ -491,12 +511,105 @@
             state.totalLoad = total;
         }
 
+        // ── Chart Data ──
+        const MAX_CHART_PTS = 300;
+        const chartHistory = {};
+
+        function pushChartPoint(tag, value) {
+            if (!chartHistory[tag]) chartHistory[tag] = [];
+            chartHistory[tag].push({ t: Date.now(), v: value });
+            if (chartHistory[tag].length > MAX_CHART_PTS) chartHistory[tag].shift();
+        }
+
+        const CHART_COLORS = ['#0ea5e9', '#8b5cf6', '#f59e0b', '#10b981', '#ef4444', '#ec4899'];
+
+        function drawChart() {
+            const canvas = document.getElementById('live-chart');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const dpr = window.devicePixelRatio || 1;
+            const w = canvas.clientWidth;
+            const h = canvas.clientHeight;
+            canvas.width = w * dpr;
+            canvas.height = h * dpr;
+            ctx.scale(dpr, dpr);
+            ctx.clearRect(0, 0, w, h);
+
+            const activeTags = (state.selectedTags || []).slice(0, state.cellCount || 1).filter(t => t);
+            if (activeTags.length === 0) return;
+
+            const now = Date.now();
+            const windowMs = 5 * 60 * 1000;
+            const tMin = now - windowMs;
+
+            let yMax = 10;
+            activeTags.forEach(tag => {
+                (chartHistory[tag] || []).forEach(p => {
+                    if (p.t >= tMin && Math.abs(p.v) > yMax) yMax = Math.abs(p.v);
+                });
+            });
+            yMax *= 1.1;
+
+            const pad = { l: 48, r: 8, t: 8, b: 20 };
+            const cw = w - pad.l - pad.r;
+            const ch = h - pad.t - pad.b;
+
+            ctx.strokeStyle = '#1a2d44';
+            ctx.lineWidth = 0.5;
+            for (let i = 0; i <= 4; i++) {
+                const y = pad.t + (ch * i / 4);
+                ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+                ctx.fillStyle = '#7a8896';
+                ctx.font = '9px sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText(Math.round(yMax * (1 - i / 4)).toLocaleString(), pad.l - 4, y + 3);
+            }
+
+            ctx.fillStyle = '#7a8896';
+            ctx.font = '9px sans-serif';
+            ctx.textAlign = 'center';
+            for (let m = 0; m <= 5; m++) {
+                const x = pad.l + (cw * m / 5);
+                ctx.fillText(`-${5 - m}m`, x, h - 4);
+            }
+
+            activeTags.forEach((tag, i) => {
+                const pts = (chartHistory[tag] || []).filter(p => p.t >= tMin);
+                if (pts.length < 2) return;
+                ctx.strokeStyle = CHART_COLORS[i % CHART_COLORS.length];
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                pts.forEach((p, j) => {
+                    const x = pad.l + ((p.t - tMin) / windowMs) * cw;
+                    const y = pad.t + ch - (Math.abs(p.v) / yMax) * ch;
+                    j === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+            });
+        }
+
         // ── GPS ──
+        state.gpsError = null;
         function getGPS() {
-            if (!navigator.geolocation) return;
+            if (!navigator.geolocation) {
+                state.gpsError = 'Geolocation not supported';
+                return;
+            }
             navigator.geolocation.getCurrentPosition(
-                (pos) => { state.gps = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }; },
-                () => {},
+                (pos) => {
+                    state.gps = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
+                    state.gpsError = null;
+                    render();
+                },
+                (err) => {
+                    if (!state.gps) {
+                        if (err.code === 1) state.gpsError = 'Location permission denied';
+                        else if (err.code === 2) state.gpsError = 'GPS unavailable (requires HTTPS)';
+                        else if (err.code === 3) state.gpsError = 'GPS timed out';
+                        else state.gpsError = 'GPS unavailable';
+                        render();
+                    }
+                },
                 { enableHighAccuracy: true, timeout: 10000 }
             );
         }
@@ -573,7 +686,9 @@
 
         function setLeakSerial(value) {
             if (!state.leakDraft) return;
+            const prev = state.leakDraft.serial;
             state.leakDraft.serial = value;
+            if (value === '__other' || prev === '__other') render();
         }
 
         function updateLeakSubmitState() {
@@ -596,7 +711,7 @@
                     dataUrl: draft.dataUrl,
                     description: draft.description.trim(),
                     severity: draft.severity,
-                    serial: (draft.serial || '').trim(),
+                    serial: (draft.serial === '__other' ? '' : (draft.serial || '')).trim(),
                     timestamp: Date.now(),
                     gps: state.gps
                 })
@@ -716,6 +831,8 @@
                     <div class="header-brand">OSCAR<span>Companion</span></div>
                     <div class="conn-badge ${dongleClass}"><span class="conn-dot"></span>${dongleLabel}</div>
                 </div>
+                ${state.activeJobName ? `<div style="background:var(--elevated);border-bottom:1px solid var(--border);padding:5px 16px;text-align:center;font-size:0.75rem;font-weight:600;color:var(--yellow);letter-spacing:0.3px">${escapeHtml(state.activeJobName)}</div>` : ''}
+                ${state.isLogging ? `<div style="background:rgba(74,222,128,0.15);border-bottom:1px solid var(--green);padding:6px 16px;display:flex;align-items:center;justify-content:center;gap:8px;font-size:0.78rem;font-weight:600;color:var(--green)"><span class="pulse"></span>Recording${state.sessionName ? ' — ' + escapeHtml(state.sessionName) : ''} &middot; ${state.loggedSamples || 0} samples</div>` : ''}
             `;
         }
 
@@ -732,7 +849,7 @@
                     <div class="hero-unit">Pounds (lbs)</div>
                     <div class="hero-conversions">
                         <span>${fmt(shortTons, 3)} short tons</span>
-                        <span>${fmt(metricTons, 3)} metric tons</span>
+                        <span>${fmt(metricTons, 3)} metric tonnes</span>
                     </div>
                 </div>
             `;
@@ -740,9 +857,27 @@
             // Session info
             if (state.isLogging) {
                 html += `<div class="session-bar recording"><span class="pulse"></span>Recording: ${state.loggedSamples || 0} samples${state.sessionName ? ' | ' + state.sessionName : ''}</div>`;
+
+                // Test phase buttons
+                const open = state.openPhases || [];
+                const funcOpen = open.includes('function');
+                const staticOpen = open.includes('static');
+                html += `
+                    <div class="test-controls">
+                        <button class="test-btn ${funcOpen ? 'func-end' : 'func-start'}" onclick="window.__toggleMarker('function')">
+                            ${funcOpen ? '⏹ End Function Test' : '▶ Function Test'}
+                        </button>
+                        <button class="test-btn ${staticOpen ? 'static-end' : 'static-start'}" onclick="window.__toggleMarker('static')">
+                            ${staticOpen ? '⏹ End Static Hold' : '▶ Static Hold'}
+                        </button>
+                    </div>
+                `;
             } else {
                 html += `<div class="session-bar">Not Recording</div>`;
             }
+
+            // Live chart
+            html += `<div class="chart-wrap"><canvas id="live-chart" class="chart-canvas"></canvas></div>`;
 
             // Cell cards
             if (activeTags.length > 0) {
@@ -777,7 +912,7 @@
                         <div class="stat-value">${fmt(shortTons, 3)}</div>
                     </div>
                     <div class="stat">
-                        <div class="stat-label">Metric Tons</div>
+                        <div class="stat-label">Metric Tonnes</div>
                         <div class="stat-value">${fmt(metricTons, 3)}</div>
                     </div>
                     ${state.isLogging && peakTotal > 0 ? `
@@ -804,7 +939,7 @@
                     <button class="camera-btn" onclick="window.__capturePhoto()">
                         <span style="font-size:1.4rem;">&#128247;</span> Take Photo
                     </button>
-                    ${state.gps ? `<div class="gps-info">GPS: ${state.gps.lat.toFixed(5)}, ${state.gps.lng.toFixed(5)} (${Math.round(state.gps.accuracy)}m accuracy)</div>` : '<div class="gps-info">Acquiring GPS...</div>'}
+                    ${state.gps ? `<div class="gps-info" style="color:var(--green)">&#9679; GPS: ${state.gps.lat.toFixed(5)}, ${state.gps.lng.toFixed(5)} (${Math.round(state.gps.accuracy)}m)</div>` : `<div class="gps-info" style="color:${state.gpsError ? 'var(--red)' : 'var(--dim)'}">${state.gpsError || 'Acquiring GPS...'}</div>`}
                     <div class="photo-grid">
                         ${state.photos.map(p => `<img src="${p.dataUrl}" class="photo-thumb" />`).join('')}
                     </div>
@@ -873,8 +1008,32 @@
                                 : `<div class="leak-photo-placeholder" onclick="window.__captureLeakPhoto()">&#128247; Tap to take photo</div>`}
                         </div>
                         <div class="leak-form-field">
-                            <div class="leak-form-label">Waterbag Serial #</div>
-                            <input id="leak-serial-input" type="text" placeholder="e.g. WB-12345" oninput="window.__setLeakSerial(this.value)" value="${escapeHtml(draft.serial || '')}" />
+                            <div class="leak-form-label">Waterbag</div>
+                            ${(() => {
+                                const allItems = (state.equipmentItems || []).filter(i => {
+                                    const desc = (i.description || i.name || '').toLowerCase();
+                                    return (desc.includes('waterbag') || desc.includes('water bag'))
+                                        && !desc.includes('buckhorn');
+                                });
+                                if (allItems.length > 0) {
+                                    const opts = allItems.map(i => {
+                                        const sn = i.serialNumber || i.serial || '';
+                                        const desc = i.description || i.name || '';
+                                        const label = sn ? (desc ? sn + ' — ' + desc : sn) : desc;
+                                        return '<option value="' + escapeHtml(sn) + '"' + (draft.serial === sn ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+                                    }).join('');
+                                    return '<select id="leak-serial-input" onchange="window.__setLeakSerial(this.value)" style="width:100%;padding:10px;border-radius:8px;border:1px solid #555;background:#1a1a2e;color:#fff;font-size:0.95rem">'
+                                        + '<option value="">— Select waterbag —</option>'
+                                        + opts
+                                        + '<option value="__other">Other (type manually)</option>'
+                                        + '</select>'
+                                        + (draft.serial === '__other' || (draft.serial && !allItems.some(i => (i.serialNumber || i.serial || '') === draft.serial) && draft.serial !== '')
+                                            ? '<input id="leak-serial-manual" type="text" placeholder="Type serial number..." oninput="window.__setLeakSerial(this.value)" value="' + escapeHtml(draft.serial === '__other' ? '' : draft.serial) + '" style="margin-top:6px" />'
+                                            : '');
+                                } else {
+                                    return '<input id="leak-serial-input" type="text" placeholder="e.g. WB-12345 (no waterbags found on job)" oninput="window.__setLeakSerial(this.value)" value="' + escapeHtml(draft.serial || '') + '" />';
+                                }
+                            })()}
                         </div>
                         <div class="leak-form-field">
                             <div class="leak-form-label">Description</div>
@@ -979,6 +1138,13 @@
         window.__setLeakSerial = setLeakSerial;
         window.__submitLeak = submitLeak;
         window.__deleteLeak = deleteLeak;
+        window.__toggleMarker = function(phase) {
+            apiFetch('/api/marker', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phase })
+            }).catch(() => {});
+        };
 
         // ── Init ──
         getGPS();

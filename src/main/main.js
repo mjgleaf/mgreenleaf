@@ -730,6 +730,11 @@ function saveLeaksToDisk(leaks) {
 }
 companionServer.setLeaks(loadLeaksFromDisk());
 companionServer.onLeaksChanged = (leaks) => { saveLeaksToDisk(leaks); };
+companionServer.onMarkerToggle = (phase) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('companion-marker-toggle', phase);
+    }
+};
 
 function scanForDongle() {
     try {
@@ -2096,11 +2101,31 @@ async function generateCertTemplate(event, description, conversationHistory, cur
 
     const systemPrompt = `You are an expert in industrial load testing certificate generation for Hydro-Wates / Scofield Group, LLC.
 
-You must select ONE of 4 certificate layouts and generate a formData object that pre-fills the certificate editor.
+CONVERSATION FLOW:
+When the user first describes a test, DO NOT immediately generate a certificate. Instead, ask clarifying questions to gather the information you need. Ask about:
+- What specific equipment is being tested (make, model, serial numbers if known)
+- Safe working loads (SWL) and target test loads / overload percentages
+- Number of individual tests or test steps
+- Which standards or codes apply (ASME, OSHA, DNV, API, etc.)
+- What instruments will be used (load cells, pressure gauges, flow meters, torque wrenches)
+- Any special procedures, hold times, or acceptance criteria
+- Customer and location info if not already known
 
-LAYOUTS:
+Ask 3-5 focused questions at a time. You may need multiple rounds. When you have enough information, generate the certificate.
 
-1. "crane-hook" — Standard crane/hoist hook testing. Use when the job tests crane hooks, hoists, or winches with measurable hook forces.
+RESPONSE FORMAT:
+Always return a JSON object. There are two response types:
+
+1. QUESTIONS (when you need more info):
+   { "message": "your questions here", "ready": false }
+
+2. CERTIFICATE (when you have enough info to generate):
+   { "certLayout": "...", "formData": {...}, "summary": "...", "ready": true }
+   Plus "testSchema" when certLayout is "dynamic".
+
+FIXED LAYOUTS (use when the test clearly fits one):
+
+1. "crane-hook" — Standard crane/hoist hook testing with measurable hook forces.
    Test array key: "tests"
    Per-test fields: { loadType: "Static"|"Dynamic", wllPercentage: string, measuredForce: null, localTime: null, testDuration: string, accept: "YES", testResults: "PASS", hookTested: string, itemDescription: string, hookData: [] }
 
@@ -2109,7 +2134,7 @@ LAYOUTS:
    Per-test fields: { loadType: "Static"|"Dynamic", wllPercentage: string, testDuration: string, localTime: null, accept: "YES", testResults: "PASS", itemDescription: string, numPickPoints: number, pickPointStart: 0, pickPointData: [{ measuredForce: "", accept: "YES" }] }
    Extra form fields: beamLength, beamManufacturer, beamSerial, beamWll, numPickPoints, pickPoints: [{ label: string, position: string, measuredForce: "", accept: "YES" }]
 
-3. "steel-weight" — Dead-weight / calibrated-weight tests. The MOST FLEXIBLE layout — use it whenever the test doesn't clearly fit another layout.
+3. "steel-weight" — Dead-weight / calibrated-weight tests with optional load cell.
    Test array key: "steelWeightTests"
    Per-test fields: { loadType: "Static"|"Dynamic", equipmentTested: string, swl: string, testLoad: string, localTime: null, testDuration: string, description: string, accept: "YES", testResults: "PASS", useLoadCell: boolean, loadCellSerial: "", loadCellCapacity: string, loadCellReading: "" }
 
@@ -2117,7 +2142,90 @@ LAYOUTS:
    Test array key: "gangwayTests"
    Per-test fields: { loadType: "Static"|"Dynamic", equipmentTested: string, swl: string, testLoad: string, flowMeterBefore: "", flowMeterAtLoad: "", flowMeterUnits: "gal", deflectionBefore: "", deflectionAfter: "", deflectionRecovered: "", deflectionUnits: "in", localTime: null, testDuration: string, description: string, accept: "YES", testResults: "PASS" }
 
-COMMON FORM FIELDS (include in every response):
+5. "dynamic" — USE THIS when the test does NOT clearly fit layouts 1-4. This layout lets you define a custom schema with whatever columns, measurement groups, and layout formatting the test application requires.
+   Test array key: "dynamicTests"
+   When using certLayout "dynamic", you MUST also return a "testSchema" object (see DYNAMIC SCHEMA FORMAT below).
+
+DYNAMIC SCHEMA FORMAT (required when certLayout is "dynamic"):
+{
+  "testSchema": {
+    "testType": "Human-readable test type label",
+    "layout": {
+      "descriptionPlacement": "inline" | "expanded",
+      // "inline" = description stays in the description column cell (compact, good for simple tests)
+      // "expanded" = description gets its own full-width row below each test row (good for detailed procedures)
+
+      "rowStyle": "compact" | "detailed",
+      // "compact" = tight rows, small fonts, fits many tests on one page
+      // "detailed" = more padding, larger fonts, prominent styling — use for complex tests with few rows
+
+      "groupBy": null | "fieldKey",
+      // null = no grouping (default). Set to a column key to group test rows under sub-headers.
+      // e.g. "equipmentTested" groups tests by equipment with a banner header for each group.
+
+      "showSummary": false,
+      // true = show a summary row at the bottom of the test table
+
+      "summaryColumns": [],
+      // Array of { "key": "columnKey", "operation": "sum"|"max"|"count", "label": "Display Label" }
+      // Only used when showSummary is true. Computes values across all test rows.
+
+      "testLabel": "Item"
+      // What to call each row number: "Item", "Step", "Test", "Section", etc.
+    },
+    "headerFields": [
+      { "key": "fieldName", "label": "Display Label" }
+    ],
+    "columns": [
+      // Each column defines a field on every test record. Properties:
+      //   key: field name in test data (camelCase)
+      //   label: display label
+      //   type: "text" | "select" | "number" | "textarea"
+      //   role: "title" (bold title in description cell), "subtitle" (italic text below title), or "column" (default, gets its own table column)
+      //   width: CSS width for table columns (e.g. "78px", "52px"). Omit for flex.
+      //   format: "force" (bold value), "accept" (green/red YES/NO coloring). Optional.
+      //   showIf: "any" means only show this column if at least one test has a value. Optional.
+      //   options: array of strings for "select" type (e.g. ["Static", "Dynamic"])
+    ],
+    "groups": [
+      {
+        "key": "groupId",
+        "label": "GROUP LABEL",
+        "color": "#hex color",
+        "toggleKey": "booleanFieldName",
+        "toggleLabel": "Checkbox label text",
+        "fields": [
+          { "key": "fieldName", "label": "Display Label", "type": "text"|"number", "addToTable": false, "tableWidth": "82px", "tableLabel": "Short Label" }
+        ]
+      }
+    ]
+  }
+}
+
+FORMATTING — every certificate MUST be visually polished and professional. Follow these rules:
+
+LAYOUT GUIDELINES — choose layout options based on the test type:
+- Pipeline / pressure tests: expanded descriptions, detailed rows, group by section
+- Simple pull tests or bolt torque: inline descriptions, compact rows, summary row with max values
+- Multi-equipment vessel tests: expanded descriptions, group by equipment, detailed rows
+- Single-equipment crane/hoist: inline descriptions, compact rows — or just use a fixed layout
+- NDT / inspection: compact rows, many columns, summary with pass count
+
+VISUAL QUALITY RULES:
+- Always use "expanded" description placement for tests with detailed procedures (more than a few words per test). Only use "inline" for very simple tests with short one-line descriptions.
+- Always use "detailed" row style unless there are 8+ test rows that need to fit on one page.
+- Group tests logically using "groupBy" when there are distinct categories (different equipment, different test phases, port/starboard, etc.).
+- Always include a summary row when there are numeric measurement columns that benefit from totals or max values.
+- Write professional, concise test descriptions: state what load is applied, how, for how long, and what is measured. One to three sentences per test step.
+- Use descriptive column labels that an engineer would expect to see (e.g. "Test Pressure (PSI)" not just "Pressure").
+- Keep column widths proportional to content — narrow for short values like "Type" (52px), wider for measurements (78-90px).
+- Write a thorough procedureSummary (3-5 sentences) covering the scope, method, equipment, and acceptance criteria.
+- Include all applicable reference standards.
+- Set testLabel to something meaningful: "Step" for sequential procedures, "Item" for independent tests, "Section" for grouped inspections.
+
+For crane-hook layout also include: equipmentTested, equipmentManufacturer, equipmentSerial, equipmentWll, hooks: [{ name: string, manufacturer: "", serial: "", wll: string }]
+
+COMMON FORM FIELDS (include in every CERTIFICATE response):
 soldTo, facilityLocation, buyer, projectRef, customerPO (leave "" if unknown),
 testDate (leave "" to use today's date),
 procedureSummary (write a detailed multi-sentence procedure summary describing ONLY the loading procedure performed and the measurements recorded — never claim the test ensures, guarantees, or verifies the equipment's operational safety, reliability, integrity, or fitness for service),
@@ -2126,17 +2234,20 @@ instruments: [{ instrument: string, capacity: string, serialNo: "", dataLink: st
 numTests: number,
 testResults: "PASS"
 
-For crane-hook layout also include: equipmentTested, equipmentManufacturer, equipmentSerial, equipmentWll, hooks: [{ name: string, manufacturer: "", serial: "", wll: string }]
-
 RULES:
-- Pick the layout that BEST fits the described test. Default to "steel-weight" when unsure.
+- On the FIRST message, ask clarifying questions (return ready: false). Do NOT generate immediately.
+- On follow-up messages, either ask more questions or generate the certificate based on what you know.
+- When the user says "generate", "go ahead", "that's all", or similar — generate the certificate even if some details are missing.
+- Pick the BEST layout. Use a fixed layout (1-4) when the test clearly fits. Use "dynamic" for anything else.
 - Create the exact number of test records described. If the user doesn't specify, infer from context.
 - Fill every field you can infer. Leave unknown fields as empty strings "".
-- Write detailed description fields for each test step.
+- Keep item descriptions SHORT — one sentence max (e.g. "Proof load at 125% SWL, 10-min static hold with load cell inline."). Do NOT write multi-sentence paragraphs in test descriptions. The procedureSummary field is where detailed procedure info belongs, not individual test descriptions.
 - SCOPE / LIABILITY: Our scope is limited to applying the specified test load and recording the measured results. Never write language stating or implying that the test, the certificate, or our company ensures, guarantees, certifies, or is responsible for the crane's (or any equipment's) operational safety, reliability, structural integrity, or fitness for continued service. This applies to procedureSummary and every description / itemDescription field. State only what was done — loads applied and forces/measurements recorded.
 - Use realistic overload percentages per industry norms (e.g. 125% proof load, 150% for ASME B30.2 cranes).
-- Return ONLY a raw JSON object with keys: "certLayout" (string), "formData" (object), and "summary" (a short 1-2 sentence description of what you generated or changed).
-- When modifying an existing certificate, return the COMPLETE updated formData — not just the changed fields. Preserve all existing data unless the user asks to change it.`;
+- For dynamic schemas: design columns, groups, AND layout options that best present the data for that specific test type. Think about what an engineer needs to see on the certificate.
+- When generating a certificate, return a raw JSON with: "certLayout", "formData", "summary", "ready": true, and optionally "testSchema".
+- When modifying an existing certificate, return the COMPLETE updated formData. Preserve all existing data unless the user asks to change it.
+- For follow-ups on a dynamic certificate, also return the full testSchema (even if unchanged) so the schema persists.`;
 
     const isFollowUp = conversationHistory && conversationHistory.length > 0;
 
@@ -2144,7 +2255,10 @@ RULES:
 
     if (isFollowUp) {
         // Inject the current form state so the AI knows what exists
-        const stateMsg = `CURRENT CERTIFICATE STATE:\ncertLayout: "${currentState.certLayout}"\nformData: ${JSON.stringify(currentState.formData, null, 0)}`;
+        let stateMsg = `CURRENT CERTIFICATE STATE:\ncertLayout: "${currentState.certLayout}"\nformData: ${JSON.stringify(currentState.formData, null, 0)}`;
+        if (currentState.testSchema) {
+            stateMsg += `\ntestSchema: ${JSON.stringify(currentState.testSchema, null, 0)}`;
+        }
         messages.push({ role: "system", content: stateMsg });
 
         // Replay conversation history (user/assistant pairs)
@@ -2175,15 +2289,24 @@ RULES:
         const content = response.data.choices[0].message.content;
         const parsed = JSON.parse(content);
 
+        if (parsed.ready === false || (!parsed.certLayout && !parsed.formData)) {
+            return { message: parsed.message || parsed.summary || 'I need more information.', ready: false };
+        }
+
         if (!parsed.certLayout || !parsed.formData) {
             throw new Error('AI response missing required certLayout or formData');
         }
 
-        const validLayouts = ['crane-hook', 'spreader-beam', 'steel-weight', 'gangway'];
+        const validLayouts = ['crane-hook', 'spreader-beam', 'steel-weight', 'gangway', 'dynamic'];
         if (!validLayouts.includes(parsed.certLayout)) {
             parsed.certLayout = 'steel-weight';
         }
 
+        if (parsed.certLayout === 'dynamic' && !parsed.testSchema) {
+            parsed.certLayout = 'steel-weight';
+        }
+
+        parsed.ready = true;
         return parsed;
     } catch (err) {
         const errorDetail = err.response?.data?.error?.message || err.message;
@@ -2383,6 +2506,7 @@ async function fetchLeadList() {
                 JobNum: getField(['JobNumber', 'Job_x0023_', 'Job Num']),
                 ProjType: getField(['ProjType', 'Project Type', 'Type']),
                 Status: getField(['Status', 'LeadStatus', 'JobStatus', 'Job_x0020_Status']),
+                CompanyAddress: getField(['CompanyAddress', 'Company Address', 'Address', 'LeadAddress', 'Lead Address', 'BillingAddress', 'Billing Address', 'Address1', 'StreetAddress', 'Street Address', 'MainAddress']),
                 ShipToAddress: getField(['ShipToAddress', 'Ship To Address', 'Ship_x0020_To_x0020_Address', 'ShipTo', 'ShippingAddress', 'Shipping Address', 'JobLocation', 'Job Location', 'Location']),
                 ContactEmail: contactEmail || '',
                 ContactName: getField(['ContactName', 'Contact Name', 'Contact_x0020_Name', 'Contact', 'CustomerContact', 'Customer Contact', 'AttentionTo', 'Attn']) || ''
@@ -2683,8 +2807,6 @@ async function fetchEquipmentForJob(event, jobNum) {
                 console.warn(`[EQUIPMENT] Failed to download cert "${cert.name}":`, err.message);
             }
         }
-        // Skip equipment items that have no certificates attached.
-        if (certEntries.length === 0) continue;
         equipmentItems.push({
             id: item.id,
             serialNumber: item.serialNumber || '',

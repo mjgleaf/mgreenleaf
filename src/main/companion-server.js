@@ -60,7 +60,8 @@ class CompanionServer {
             overloadTags: [],
             deviceStatus: 'disconnected',
             leaks: [],
-            equipmentItems: []
+            equipmentItems: [],
+            openPhases: []
         };
         this.leaks = [];
         this.certCache = new Map(); // id -> { name, buffer, mime }
@@ -173,6 +174,17 @@ class CompanionServer {
             res.setHeader('Content-Type', entry.mime || 'application/octet-stream');
             res.setHeader('Content-Disposition', `inline; filename="${entry.name.replace(/"/g, '')}"`);
             res.send(entry.buffer);
+        });
+
+        // API for companion to toggle test phase markers
+        this.app.post('/api/marker', (req, res) => {
+            const { phase } = req.body;
+            if (!phase || !['function', 'static'].includes(phase)) {
+                res.status(400).json({ error: 'phase must be "function" or "static"' });
+                return;
+            }
+            if (this.onMarkerToggle) this.onMarkerToggle(phase);
+            res.json({ success: true });
         });
 
         // API to get server info
