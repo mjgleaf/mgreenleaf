@@ -6,6 +6,7 @@ import { SignaturePad } from './CustomerView';
 import StandardFinder from './StandardFinder';
 import logo from '../logo.png';
 import { certificateTemplates } from '../data/certificateTemplates';
+import { deepFillBlanks } from '../data/templateSchema';
 
 const MAX_CHART_POINTS = 500;
 
@@ -63,6 +64,8 @@ function CertChart({ stats, yAxisLabel, xAxisLabel, isPrint }) {
         </ResponsiveContainer>
     );
 }
+
+const DEFAULT_CERT_LAYOUT = 'crane-hook';
 
 const buildDefaultFormData = () => ({
     soldTo: '',
@@ -179,7 +182,7 @@ const buildDefaultFormData = () => ({
     dynamicTests: []
 });
 
-const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit, promptAiOnArrival, onAiPromptResolved }) => {
+const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, selectedJob, xUnit, displayUnit, promptAiOnArrival, onAiPromptResolved, templateMode = false, onTemplateSaved }) => {
     // data is actually the job object now due to activeJob refactor
     const job = data;
     const dataSets = job?.dataSets || [];
@@ -369,7 +372,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
     const [isPreview, setIsPreview] = useState(false);
     const [showAiWizard, setShowAiWizard] = useState(false);
-    const [certLayout, setCertLayoutState] = useState(job?.metadata?.certLayout || 'crane-hook');
+    const [certLayout, setCertLayoutState] = useState(job?.metadata?.certLayout || DEFAULT_CERT_LAYOUT);
     const setCertLayout = (next) => {
         setCertLayoutState(next);
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certLayout: next });
@@ -412,6 +415,10 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const [emailBody, setEmailBody] = useState('');
     const [emailSending, setEmailSending] = useState(false);
     const [emailStatus, setEmailStatus] = useState(null); // { type: 'success'|'error', message }
+
+    // Save-as-Template dialog. Electron's renderer has no window.prompt(), so name +
+    // job-number are collected via this in-app modal. null = closed.
+    const [templateSaveModal, setTemplateSaveModal] = useState(null);
 
     const [testSchema, setTestSchema] = useState(job?.metadata?.testSchema || null);
 
@@ -524,6 +531,37 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 } catch (_) { /* offline or no cache */ }
             }
 
+            // Look up a job-assigned template (prepared ahead of time by the PM) for this
+            // job number — cache first (instant / works offline), then SharePoint. If more
+            // than one is assigned to the job, the most recently updated wins. Skipped in
+            // the template builder, which seeds straight from the template being edited.
+            let assignedTemplate = null;
+            if (!templateMode && job?.metadata?.jobNumber) {
+                const pickNewest = (list) => (list || [])
+                    .filter(t => String(t.jobNumber).trim() === String(job.metadata.jobNumber).trim())
+                    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))[0] || null;
+                try {
+                    const cache = await getElectronAPI().getTemplatesCache?.();
+                    assignedTemplate = pickNewest(cache?.templates);
+                    if (!assignedTemplate && getElectronAPI().listTemplatesForJob) {
+                        assignedTemplate = pickNewest(await getElectronAPI().listTemplatesForJob(job.metadata.jobNumber));
+                    }
+                } catch (_) { /* offline or not signed in — proceed without a template */ }
+            }
+            const hasManualCert = !!job?.metadata?.certData;
+
+            // Layout/test-schema live in separate state, so apply them before the form merge.
+            // Only on a fresh job and only when still at defaults, so a tech's own choice is
+            // never overridden.
+            if (assignedTemplate && !hasManualCert) {
+                if (assignedTemplate.certLayout && certLayout === DEFAULT_CERT_LAYOUT && !job?.metadata?.certLayout) {
+                    setCertLayout(assignedTemplate.certLayout);
+                }
+                if (assignedTemplate.testSchema && !testSchema && !job?.metadata?.testSchema) {
+                    setTestSchemaAndPersist(assignedTemplate.testSchema);
+                }
+            }
+
             setFormData(prev => {
                 let current = { ...prev };
 
@@ -618,6 +656,30 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     if (!current.soldTo) current.soldTo = job.metadata.leadCompany || job.metadata.customer || '';
                     if (!current.customerPO) current.customerPO = job.metadata.poNumber || '';
                     if (!current.buyer) current.buyer = job.metadata.customer || '';
+                }
+
+                // Apply a job-assigned template (prepared ahead of time by the PM).
+                //  • Fresh job  -> the template is authoritative for the fields it specifies,
+                //    and SharePoint-derived customer info fills any gaps it left blank.
+                //  • Edited job -> fill blank fields ONLY, so a tech's manual edits (already
+                //    loaded into `current` from certData above) are never overwritten.
+                if (assignedTemplate && assignedTemplate.formData) {
+                    const tplForm = assignedTemplate.formData;
+                    const artifacts = {
+                        photos: current.photos || [],
+                        graphPageBreaks: current.graphPageBreaks || {},
+                        sectionOrder: current.sectionOrder
+                    };
+                    current = hasManualCert
+                        ? deepFillBlanks(current, tplForm)
+                        : deepFillBlanks(tplForm, current);
+                    Object.assign(current, artifacts);
+                    // Persist the prepared certificate to the job so the workflow unlocks
+                    // (Live Recording gates on certData.procedureSummary) and the template
+                    // "sticks". Later opens then take the fill-blanks-only path above.
+                    if (!hasManualCert && onUpdateMetadata && jobId) {
+                        onUpdateMetadata(jobId, { certData: current });
+                    }
                 }
 
                 // Auto-fill test records from each dataset's peak stats
@@ -1080,6 +1142,48 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             onUpdateMetadata(jobId, { drafts: newDrafts });
         }
         alert("Draft saved successfully!");
+    };
+
+    // Save the current editor setup as a reusable, job-assigned template (shared via
+    // SharePoint). Prompts for a name and the job number to assign it to. Photos are
+    // stripped — templates carry procedure/test structure, not per-cert images.
+    // Opens the Save-as-Template modal, prefilled from the current job/template context.
+    const handleSaveAsTemplate = () => {
+        setTemplateSaveModal({
+            name: job?.metadata?.templateName || formData.projectRef || '',
+            jobNumber: job?.metadata?.jobNumber || formData.projectRef || '',
+            saving: false,
+        });
+    };
+
+    // Performs the actual SharePoint write once the modal is confirmed.
+    const confirmSaveAsTemplate = async () => {
+        const name = (templateSaveModal?.name || '').trim() || 'Untitled Template';
+        const jobNumber = (templateSaveModal?.jobNumber || '').trim();
+        const api = getElectronAPI();
+        if (!api.saveTemplate) { alert('Templates are unavailable in this environment.'); return; }
+
+        const payload = {
+            id: job?.metadata?.templateId || undefined,
+            name,
+            description: job?.metadata?.templateDescription || '',
+            jobNumber,
+            certLayout,
+            testSchema,
+            formData: { ...formData, photos: [] }
+        };
+
+        setTemplateSaveModal(m => (m ? { ...m, saving: true } : m));
+        const result = await api.saveTemplate(payload);
+        if (result?.success) {
+            setTemplateSaveModal(null);
+            alert(`Template "${name}" saved${jobNumber ? ` and assigned to job ${jobNumber}` : ''}.`);
+            if (onTemplateSaved) onTemplateSaved(result.item);
+        } else {
+            setTemplateSaveModal(m => (m ? { ...m, saving: false } : m));
+            alert('Could not save template.\n\n' + (result?.error
+                || 'Microsoft sign-in required. Open the Dashboard, click "Refresh Job List" to sign in, then try again.'));
+        }
     };
 
     const handleResetForm = () => {
@@ -2272,6 +2376,35 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
     return (
         <div className="certificate-form-container">
+            {templateSaveModal && (
+                <div className="no-print" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <div style={{ background: '#fff', borderRadius: '8px', width: '460px', maxWidth: '92vw', boxShadow: '0 10px 40px rgba(0,0,0,0.3)' }}>
+                        <div style={{ background: '#1a3a6c', color: '#fff', padding: '14px 20px', borderRadius: '8px 8px 0 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <strong style={{ fontSize: '16px' }}>📋 Save as Template</strong>
+                            <button onClick={() => setTemplateSaveModal(null)} disabled={templateSaveModal.saving} style={{ background: 'transparent', border: 'none', color: '#fff', fontSize: '20px', cursor: 'pointer', lineHeight: 1 }}>×</button>
+                        </div>
+                        <div style={{ padding: '20px' }}>
+                            <div className="form-group" style={{ marginBottom: '12px' }}>
+                                <label style={{ fontWeight: 600, display: 'block', marginBottom: '4px' }}>Template name</label>
+                                <input type="text" autoFocus value={templateSaveModal.name} onChange={(e) => setTemplateSaveModal(m => ({ ...m, name: e.target.value }))} placeholder="e.g. Vessel 11-test proof load" style={{ width: '100%' }} />
+                            </div>
+                            <div className="form-group" style={{ marginBottom: '12px' }}>
+                                <label style={{ fontWeight: 600, display: 'block', marginBottom: '4px' }}>Assign to job number <span style={{ fontWeight: 400, color: '#888' }}>(optional)</span></label>
+                                <input type="text" value={templateSaveModal.jobNumber} onChange={(e) => setTemplateSaveModal(m => ({ ...m, jobNumber: e.target.value }))} placeholder="e.g. HWI-26-179" style={{ width: '100%' }} />
+                            </div>
+                            <div style={{ fontSize: '13px', color: '#555', background: '#f1f5f9', borderRadius: '6px', padding: '8px 12px', marginBottom: '14px' }}>
+                                📌 When a field tech opens this job, the certificate auto-fills from this template — blank fields only. Leave the job number empty to save it unassigned.
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                                <button onClick={() => setTemplateSaveModal(null)} disabled={templateSaveModal.saving} className="action-btn secondary">Cancel</button>
+                                <button onClick={confirmSaveAsTemplate} disabled={templateSaveModal.saving} className="action-btn" style={{ background: '#1a3a6c' }}>
+                                    {templateSaveModal.saving ? 'Saving…' : '📋 Save Template'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
             {/* Certificate Tabs */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '12px', flexWrap: 'wrap' }}>
                 {(() => {
@@ -2310,6 +2443,17 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 </button>
             </div>
 
+            {templateMode && (
+                <div style={{ background: 'rgba(240,184,0,0.1)', border: '1px solid var(--yellow-accent)', borderRadius: '10px', padding: '12px 18px', marginBottom: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+                    <div style={{ fontSize: '0.9rem' }}>
+                        <strong>📋 Template Builder</strong> — set up the certificate below, then save it. You'll be asked which job number to assign it to so the field tech who opens that job gets it automatically.
+                    </div>
+                    <button onClick={handleSaveAsTemplate} className="action-btn" style={{ fontSize: '0.85rem', padding: '8px 18px', whiteSpace: 'nowrap' }}>
+                        💾 Save as Template
+                    </button>
+                </div>
+            )}
+
             <div className="cert-editor-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', background: 'var(--bg-card)', padding: '14px 20px', borderRadius: '0 10px 10px 10px', border: '1px solid var(--border)' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <button
@@ -2341,9 +2485,19 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     >
                         Reset
                     </button>
-                    <button onClick={showPreview} className="action-btn" style={{ fontSize: '0.85rem', padding: '8px 18px' }}>
-                        Preview
+                    <button
+                        onClick={handleSaveAsTemplate}
+                        className="action-btn secondary small"
+                        title="Save this certificate setup as a reusable, job-assigned template"
+                        style={{ fontSize: '0.78rem', padding: '5px 10px' }}
+                    >
+                        📋 Save as Template
                     </button>
+                    {!templateMode && (
+                        <button onClick={showPreview} className="action-btn" style={{ fontSize: '0.85rem', padding: '8px 18px' }}>
+                            Preview
+                        </button>
+                    )}
                 </div>
             </div>
 

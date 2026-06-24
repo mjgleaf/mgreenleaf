@@ -1337,6 +1337,33 @@ function loadJobCache() {
     return null;
 }
 
+// --- Job-Assigned Certificate Templates Cache for Offline Use ---
+function saveTemplatesCache(templates) {
+    const cachePath = getDataPath('templates-cache.json');
+    const cacheData = {
+        timestamp: new Date().toISOString(),
+        templates: templates
+    };
+    fs.writeFileSync(cachePath, JSON.stringify(cacheData, null, 2));
+    console.log(`Templates cache saved: ${templates.length} templates at ${cacheData.timestamp}`);
+}
+
+function loadTemplatesCache() {
+    const cachePath = getDataPath('templates-cache.json');
+    if (fs.existsSync(cachePath)) {
+        try {
+            const data = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
+            console.log(`Templates cache loaded: ${data.templates?.length || 0} templates from ${data.timestamp}`);
+            return data;
+        } catch (e) {
+            console.error('Failed to load templates cache:', e);
+            if (e instanceof SyntaxError) backupCorruptFile(cachePath, 'TEMPLATES-CACHE');
+            return null;
+        }
+    }
+    return null;
+}
+
 // --- Shipments Cache for Offline Use ---
 function saveShipmentsCache(shipments) {
     const cachePath = getDataPath('shipments-cache.json');
@@ -1748,7 +1775,7 @@ const tokenCachePlugin = {
 // All delegated Microsoft Graph scopes the app uses. Interactive sign-in requests this
 // full set so a single consent covers SharePoint reads AND sending mail (leak/certificate
 // emails) — preventing a later background device-code prompt just for Mail.Send.
-const APP_SCOPES = ['Files.Read.All', 'Sites.Read.All', 'Mail.Send'];
+const APP_SCOPES = ['Files.Read.All', 'Sites.Read.All', 'Sites.ReadWrite.All', 'Mail.Send'];
 
 // options.silentOnly: when true, never fall back to an interactive device-code sign-in —
 //   throw instead. Background senders (leak/cert email) use this so they fail and retry
@@ -2640,6 +2667,141 @@ async function resolveSiteAndList(graphToken, sharepointSite, listDisplayName) {
     return { hostname, siteId, listId: list.id };
 }
 
+// --- Job-Assigned Certificate Templates (shared across machines via SharePoint) ---
+// A template = the cert editor's { certLayout, testSchema, formData } triple, stored
+// as a JSON blob on a SharePoint list ("OSCAR Job Templates") keyed by job number so a
+// PM can prepare certificates ahead of time and field techs pick them up automatically.
+const JOB_TEMPLATE_LIST = 'OSCAR Job Templates';
+
+function templateSiteUrl() {
+    const settings = loadSettings();
+    return settings.sharepointSite || 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles';
+}
+
+// Map a SharePoint list item into the template object the renderer expects. SP internal
+// column names vary, so every field goes through spFieldLookup (same approach as Load Out).
+function templateFromListItem(item) {
+    const fields = item.fields || {};
+    let parsed = {};
+    const raw = spFieldLookup(fields, ['TemplateJson', 'Template Json', 'TemplateData', 'Template_x0020_Json']);
+    if (raw) {
+        try { parsed = JSON.parse(raw); }
+        catch (e) { console.warn(`[TEMPLATES] Item ${item.id} has invalid TemplateJson:`, e.message); }
+    }
+    return {
+        id: item.id,
+        name: spFieldLookup(fields, ['Title', 'Name', 'TemplateName']) || 'Untitled Template',
+        description: spFieldLookup(fields, ['Description', 'Notes']) || '',
+        jobNumber: (spFieldLookup(fields, ['JobNumber', 'Job Number', 'Job_x0020_Number', 'JobNum', 'Job_x0023_']) ?? '').toString(),
+        certLayout: parsed.certLayout || null,
+        testSchema: parsed.testSchema || null,
+        formData: parsed.formData || {},
+        updatedBy: spFieldLookup(fields, ['UpdatedBy', 'Updated By', 'Author']) || '',
+        updatedAt: spFieldLookup(fields, ['UpdatedAt', 'Updated At', 'Modified']) || item.lastModifiedDateTime || ''
+    };
+}
+
+// Read all job templates from SharePoint; on ANY error (offline, not signed in, list
+// missing) fall back to the offline cache so techs still get their templates.
+// `silent: true` never launches an interactive sign-in — used by the certificate
+// auto-fill path so simply opening a job can't pop a Microsoft login.
+async function fetchJobTemplates({ silent = false } = {}) {
+    try {
+        const token = await getAccessToken(['Files.Read.All', 'Sites.Read.All'], { silentOnly: silent });
+        const { siteId, listId } = await resolveSiteAndList(token, templateSiteUrl(), JOB_TEMPLATE_LIST);
+        const config = { headers: { Authorization: `Bearer ${token}` } };
+        let items = [];
+        let nextUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/items?expand=fields&$top=200`;
+        while (nextUrl) {
+            const res = await axios.get(nextUrl, config);
+            items = items.concat(res.data.value || []);
+            nextUrl = res.data['@odata.nextLink'] || null;
+        }
+        const templates = items.map(templateFromListItem);
+        saveTemplatesCache(templates);
+        console.log(`[TEMPLATES] Fetched ${templates.length} job templates from SharePoint.`);
+        return templates;
+    } catch (err) {
+        console.error('[TEMPLATES] Fetch failed, falling back to cache:', err.response?.data?.error?.message || err.message);
+        return loadTemplatesCache()?.templates || [];
+    }
+}
+
+// Used by the certificate auto-fill path — silent so opening a job never pops a login.
+async function fetchTemplatesForJob(jobNumber) {
+    if (!jobNumber) return [];
+    const all = await fetchJobTemplates({ silent: true });
+    const want = String(jobNumber).trim();
+    return all.filter(t => String(t.jobNumber).trim() === want);
+}
+
+// Create (no id) or update (id) a job template. Writes require Sites.ReadWrite.All; the
+// first write after this scope was added triggers a fresh device-code consent. Never
+// writes to the local cache on failure — SharePoint is the source of truth for sharing.
+async function saveJobTemplate(payload) {
+    const { id, name, description, jobNumber, certLayout, testSchema, formData } = payload || {};
+    try {
+        const token = await getAccessToken(['Sites.ReadWrite.All']);
+        const { siteId, listId } = await resolveSiteAndList(token, templateSiteUrl(), JOB_TEMPLATE_LIST);
+        const config = { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } };
+
+        let updatedBy = '';
+        try {
+            const accounts = await msalClient?.getTokenCache().getAllAccounts();
+            updatedBy = accounts?.[0]?.username || '';
+        } catch (_) { /* best effort */ }
+
+        const fields = {
+            Title: name || 'Untitled Template',
+            Description: description || '',
+            JobNumber: String(jobNumber || ''),
+            TemplateJson: JSON.stringify({ certLayout: certLayout || null, testSchema: testSchema || null, formData: formData || {} }),
+            UpdatedBy: updatedBy,
+            UpdatedAt: new Date().toISOString()
+        };
+
+        let item;
+        if (id) {
+            const res = await axios.patch(
+                `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/items/${id}/fields`,
+                fields, config
+            );
+            item = { id, fields: res.data };
+            console.log(`[TEMPLATES] Updated template ${id} for job ${fields.JobNumber}.`);
+        } else {
+            const res = await axios.post(
+                `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/items`,
+                { fields }, config
+            );
+            item = res.data;
+            console.log(`[TEMPLATES] Created template ${item.id} for job ${fields.JobNumber}.`);
+        }
+        await fetchJobTemplates(); // refresh offline cache to reflect the write
+        return { success: true, item: templateFromListItem(item) };
+    } catch (err) {
+        const msg = err.response?.data?.error?.message || err.message;
+        console.error('[TEMPLATES] Save failed:', msg);
+        return { success: false, error: msg };
+    }
+}
+
+async function deleteJobTemplate(id) {
+    if (!id) return { success: false, error: 'No template id provided' };
+    try {
+        const token = await getAccessToken(['Sites.ReadWrite.All']);
+        const { siteId, listId } = await resolveSiteAndList(token, templateSiteUrl(), JOB_TEMPLATE_LIST);
+        const config = { headers: { Authorization: `Bearer ${token}` } };
+        await axios.delete(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/items/${id}`, config);
+        console.log(`[TEMPLATES] Deleted template ${id}.`);
+        await fetchJobTemplates();
+        return { success: true };
+    } catch (err) {
+        const msg = err.response?.data?.error?.message || err.message;
+        console.error('[TEMPLATES] Delete failed:', msg);
+        return { success: false, error: msg };
+    }
+}
+
 async function fetchLoadOutItemsForJob(jobNum) {
     if (!jobNum) return [];
     const token = await getAccessToken();
@@ -2937,6 +3099,13 @@ app.whenReady().then(() => {
     ipcMain.handle('sharepoint:fetchJobs', fetchLeadList);
     ipcMain.handle('sharepoint:getJobsCache', () => loadJobCache());
     ipcMain.handle('sharepoint:fetchEquipmentForJob', fetchEquipmentForJob);
+
+    // Job-assigned certificate templates (shared via SharePoint)
+    ipcMain.handle('templates:list', () => fetchJobTemplates());
+    ipcMain.handle('templates:listForJob', (event, jobNumber) => fetchTemplatesForJob(jobNumber));
+    ipcMain.handle('templates:save', (event, payload) => saveJobTemplate(payload));
+    ipcMain.handle('templates:delete', (event, id) => deleteJobTemplate(id));
+    ipcMain.handle('templates:getCache', () => loadTemplatesCache());
     ipcMain.handle('sharepoint:logout', async () => {
         const cachePath = getCachePath();
         if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);

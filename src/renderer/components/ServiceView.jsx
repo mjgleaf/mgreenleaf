@@ -10,6 +10,7 @@ import ReportView from './ReportView';
 import CertificateView from './CertificateView';
 import { SettingsView } from './SettingsView';
 import JobSelector from './JobSelector';
+import TemplatesView from './TemplatesView';
 import { QRCodeSVG } from 'qrcode.react';
 import { getElectronAPI } from '../utils/electronAPI';
 
@@ -68,6 +69,13 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     // as a draft. pendingLeaveCert holds the navigation to run once the user answers.
     const [showSaveCertPrompt, setShowSaveCertPrompt] = useState(false);
     const [pendingLeaveCert, setPendingLeaveCert] = useState(null);
+
+    // Template builder: the template being edited (null = build a new blank one).
+    const [editingTemplate, setEditingTemplate] = useState(null);
+    const openTemplateBuilder = (tpl = null) => {
+        setEditingTemplate(tpl);
+        setActiveTab('template-builder');
+    };
 
     // Companion Server state
     const [companionRunning, setCompanionRunning] = useState(false);
@@ -800,6 +808,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             📱 Companion{companionRunning ? ` (${companionClients})` : ''}
                         </button>
                         <button className={`nav-btn ${activeTab === 'leaks' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('leaks'))}>💧 Leak Logs{companionLeaks.length > 0 ? ` (${companionLeaks.length})` : ''}</button>
+                        <button className={`nav-btn ${activeTab === 'templates' || activeTab === 'template-builder' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('templates'))}>📋 Templates</button>
 
                         <div className="flex-grow"></div>
                         <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('settings'))}>⚙️ Settings</button>
@@ -1195,6 +1204,39 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 </div>
                             )}
                         </div>
+                    )}
+                    {activeTab === 'templates' && (
+                        <TemplatesView
+                            onNewTemplate={() => openTemplateBuilder(null)}
+                            onEditTemplate={(tpl) => openTemplateBuilder(tpl)}
+                        />
+                    )}
+                    {activeTab === 'template-builder' && (
+                        <ErrorBoundary>
+                            <CertificateView
+                                templateMode
+                                jobId={null}
+                                data={editingTemplate ? {
+                                    metadata: {
+                                        certData: editingTemplate.formData,
+                                        certLayout: editingTemplate.certLayout,
+                                        testSchema: editingTemplate.testSchema,
+                                        jobNumber: editingTemplate.jobNumber,
+                                        templateId: editingTemplate.id,
+                                        templateName: editingTemplate.name,
+                                        templateDescription: editingTemplate.description
+                                    }
+                                } : null}
+                                selectedJob={null}
+                                onUpdateMetadata={() => { }}
+                                onPreviewModeChange={() => { }}
+                                xUnit={xUnit}
+                                displayUnit={displayUnit}
+                                promptAiOnArrival={false}
+                                onAiPromptResolved={() => { }}
+                                onTemplateSaved={() => setActiveTab('templates')}
+                            />
+                        </ErrorBoundary>
                     )}
                     {activeTab === 'settings' && <SettingsView onSettingsSaved={() => { }} />}
                 </div>

@@ -27,6 +27,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getJobsCache: () => ipcRenderer.invoke('sharepoint:getJobsCache'),
     fetchEquipmentForJob: (jobNum) => ipcRenderer.invoke('sharepoint:fetchEquipmentForJob', jobNum),
     logout: () => ipcRenderer.invoke('sharepoint:logout'),
+
+    // Job-Assigned Certificate Templates (shared via SharePoint)
+    listTemplates: () => ipcRenderer.invoke('templates:list'),
+    listTemplatesForJob: (jobNumber) => ipcRenderer.invoke('templates:listForJob', jobNumber),
+    saveTemplate: (payload) => ipcRenderer.invoke('templates:save', payload),
+    deleteTemplate: (id) => ipcRenderer.invoke('templates:delete', id),
+    getTemplatesCache: () => ipcRenderer.invoke('templates:getCache'),
     determineStandard: (answers) => ipcRenderer.invoke('ai:determineStandard', answers),
     generateCertTemplate: (description, history, currentState) => ipcRenderer.invoke('ai:generateCertTemplate', description, history, currentState),
     optimizeCertLayout: (metrics) => ipcRenderer.invoke('ai:optimizeCertLayout', metrics),
