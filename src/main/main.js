@@ -1748,7 +1748,7 @@ const tokenCachePlugin = {
 // All delegated Microsoft Graph scopes the app uses. Interactive sign-in requests this
 // full set so a single consent covers SharePoint reads AND sending mail (leak/certificate
 // emails) — preventing a later background device-code prompt just for Mail.Send.
-const APP_SCOPES = ['Files.Read.All', 'Sites.Read.All', 'Mail.Send'];
+const APP_SCOPES = ['Files.Read.All', 'Sites.Read.All', 'Sites.ReadWrite.All', 'Mail.Send'];
 
 // options.silentOnly: when true, never fall back to an interactive device-code sign-in —
 //   throw instead. Background senders (leak/cert email) use this so they fail and retry
@@ -2640,6 +2640,129 @@ async function resolveSiteAndList(graphToken, sharepointSite, listDisplayName) {
     return { hostname, siteId, listId: list.id };
 }
 
+// --- OSCAR Job Templates (SharePoint-backed certificate templates) ---
+// PMs author a certificate in the app and save it to the "OSCAR Job Templates" list keyed
+// by job number; when that job is opened (on the jobsite), the template syncs back in.
+const TEMPLATE_LIST_NAME = 'OSCAR Job Templates';
+// Columns that may hold the job number to match on (Title always exists as a fallback).
+const TEMPLATE_JOBNUM_COLUMNS = ['JobNumber', 'Job Number', 'Job_x0020_Number', 'JobNum', 'Quote', 'QuoteNum', 'Title'];
+
+function templateSiteUrl() {
+    const settings = loadSettings();
+    return settings.sharepointSite || 'https://hydrowates.sharepoint.com/sites/Hydro-WatesFiles';
+}
+
+// The template JSON is stamped with this marker so we can find it on read regardless of
+// which column it lives in (robust to whatever columns the user's list happens to have).
+const TEMPLATE_MARKER = 'oscar-cert-template';
+
+function extractTemplateFromFields(fields) {
+    for (const key of Object.keys(fields || {})) {
+        const v = fields[key];
+        if (typeof v !== 'string' || v.length < 12 || v.charAt(0) !== '{') continue;
+        try {
+            const obj = JSON.parse(v);
+            if (obj && obj._oscar === TEMPLATE_MARKER) return obj;
+        } catch (e) { /* not our JSON */ }
+    }
+    return null;
+}
+
+// Find (or create) a multiline text column to store the template JSON; returns its internal name.
+async function ensureTemplateColumn(token, siteId, listId) {
+    const config = { headers: { Authorization: `Bearer ${token}` } };
+    const colsRes = await axios.get(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/columns`, config);
+    const cols = colsRes.data.value || [];
+    const match = cols.find(c => c.text && !c.readOnly && /template|json|data|cert/i.test(`${c.name} ${c.displayName || ''}`));
+    if (match) return match.name;
+    const createRes = await axios.post(
+        `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/columns`,
+        { name: 'TemplateData', text: { allowMultipleLines: true, linesForEditing: 6 } },
+        config
+    );
+    return createRes.data.name || 'TemplateData';
+}
+
+async function fetchAllTemplateItems(token, siteId, listId) {
+    const config = { headers: { Authorization: `Bearer ${token}` } };
+    let items = [];
+    let nextUrl = `https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/items?expand=fields&$top=200`;
+    while (nextUrl) {
+        const res = await axios.get(nextUrl, config);
+        items = items.concat(res.data.value || []);
+        nextUrl = res.data['@odata.nextLink'] || null;
+    }
+    return items;
+}
+
+function findTemplateItem(items, jobNumber) {
+    const jobStr = String(jobNumber).trim();
+    return items.find(item => {
+        const raw = spFieldLookup(item.fields || {}, TEMPLATE_JOBNUM_COLUMNS);
+        return raw !== undefined && raw !== null && String(raw).trim() === jobStr;
+    }) || null;
+}
+
+async function saveCertTemplate(event, jobNumber, template) {
+    if (!jobNumber) return { success: false, error: 'This certificate has no job number to key the template by.' };
+    try {
+        const token = await getAccessToken(['Sites.ReadWrite.All']); // triggers one-time consent if needed
+        const { siteId, listId } = await resolveSiteAndList(token, templateSiteUrl(), TEMPLATE_LIST_NAME);
+        const templateCol = await ensureTemplateColumn(token, siteId, listId);
+        const config = { headers: { Authorization: `Bearer ${token}` } };
+        const payload = {
+            Title: String(jobNumber),
+            [templateCol]: JSON.stringify({ _oscar: TEMPLATE_MARKER, v: 1, savedAt: new Date().toISOString(), ...template })
+        };
+        const existing = findTemplateItem(await fetchAllTemplateItems(token, siteId, listId), jobNumber);
+        if (existing) {
+            await axios.patch(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/items/${existing.id}/fields`, payload, config);
+        } else {
+            await axios.post(`https://graph.microsoft.com/v1.0/sites/${siteId}/lists/${listId}/items`, { fields: payload }, config);
+        }
+        console.log(`[TEMPLATES] Saved template for job ${jobNumber} (${existing ? 'updated' : 'created'})`);
+        return { success: true, updated: !!existing };
+    } catch (err) {
+        const detail = err.response?.data?.error?.message || err.message;
+        console.error('[TEMPLATES] Save failed:', detail);
+        return { success: false, error: detail };
+    }
+}
+
+async function loadCertTemplate(event, jobNumber) {
+    if (!jobNumber) return { success: true, template: null };
+    try {
+        const token = await getAccessToken(); // read scope is sufficient
+        const { siteId, listId } = await resolveSiteAndList(token, templateSiteUrl(), TEMPLATE_LIST_NAME);
+        const item = findTemplateItem(await fetchAllTemplateItems(token, siteId, listId), jobNumber);
+        if (!item) return { success: true, template: null };
+        const tpl = extractTemplateFromFields(item.fields || {});
+        if (!tpl) return { success: true, template: null };
+        return { success: true, template: tpl, savedAt: tpl.savedAt || item.lastModifiedDateTime || null };
+    } catch (err) {
+        const detail = err.response?.data?.error?.message || err.message;
+        console.error('[TEMPLATES] Load failed:', detail);
+        return { success: false, error: detail };
+    }
+}
+
+async function listCertTemplates() {
+    try {
+        const token = await getAccessToken();
+        const { siteId, listId } = await resolveSiteAndList(token, templateSiteUrl(), TEMPLATE_LIST_NAME);
+        const items = await fetchAllTemplateItems(token, siteId, listId);
+        const templates = items
+            .map(item => ({
+                jobNumber: spFieldLookup(item.fields || {}, TEMPLATE_JOBNUM_COLUMNS),
+                modified: item.lastModifiedDateTime
+            }))
+            .filter(t => t.jobNumber);
+        return { success: true, templates };
+    } catch (err) {
+        return { success: false, error: err.response?.data?.error?.message || err.message };
+    }
+}
+
 async function fetchLoadOutItemsForJob(jobNum) {
     if (!jobNum) return [];
     const token = await getAccessToken();
@@ -2937,6 +3060,9 @@ app.whenReady().then(() => {
     ipcMain.handle('sharepoint:fetchJobs', fetchLeadList);
     ipcMain.handle('sharepoint:getJobsCache', () => loadJobCache());
     ipcMain.handle('sharepoint:fetchEquipmentForJob', fetchEquipmentForJob);
+    ipcMain.handle('cert:saveTemplate', saveCertTemplate);
+    ipcMain.handle('cert:loadTemplate', loadCertTemplate);
+    ipcMain.handle('cert:listTemplates', listCertTemplates);
     ipcMain.handle('sharepoint:logout', async () => {
         const cachePath = getCachePath();
         if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath);

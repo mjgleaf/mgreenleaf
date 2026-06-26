@@ -413,6 +413,11 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const [emailSending, setEmailSending] = useState(false);
     const [emailStatus, setEmailStatus] = useState(null); // { type: 'success'|'error', message }
 
+    // SharePoint "OSCAR Job Templates" — save/load certificate templates by job number
+    const [savingTemplate, setSavingTemplate] = useState(false);
+    const [templateStatus, setTemplateStatus] = useState(null); // { type: 'success'|'error', message }
+    const [availableTemplate, setAvailableTemplate] = useState(null); // { template, savedAt } found in SharePoint
+
     const [testSchema, setTestSchema] = useState(job?.metadata?.testSchema || null);
 
     const setTestSchemaAndPersist = (schema) => {
@@ -493,11 +498,8 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         };
     }, []);
 
-    // The parent flips promptAiOnArrival to true each time a job is selected from
-    // the dashboard. Show the "Generate with AI?" prompt once per selection.
-    useEffect(() => {
-        if (promptAiOnArrival) setShowAiPrompt(true);
-    }, [promptAiOnArrival]);
+    // The "Generate with AI?" prompt is shown from the template-sync effect below, but
+    // only when no saved template exists for the job (a template takes precedence).
 
     const acceptAiPrompt = () => {
         setShowAiPrompt(false);
@@ -981,6 +983,96 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         setFormData(newFormData);
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: newFormData });
     };
+
+    // --- SharePoint Job Templates ---
+    const getJobNumber = () => (job?.metadata?.jobNumber || formData.projectRef || selectedJob?.QuoteNum || '').toString().trim();
+
+    // Save the current certificate as the reusable template for this job number. The
+    // template captures structure only — runtime field-tech results/photos are stripped.
+    const saveAsTemplate = async () => {
+        const api = getElectronAPI();
+        if (!api.certSaveTemplate) { alert('Templates are not available in this build.'); return; }
+        const jobNumber = getJobNumber();
+        if (!jobNumber) {
+            alert('This certificate has no job number. Select a job (or set the Project Ref) before saving a template.');
+            return;
+        }
+        const { fieldTestSheet, fieldResults, photos, ...cleanForm } = formData;
+        const template = { certLayout, testSchema, formData: cleanForm };
+        setSavingTemplate(true);
+        setTemplateStatus(null);
+        try {
+            const res = await api.certSaveTemplate(jobNumber, template);
+            if (res?.success) {
+                setTemplateStatus({ type: 'success', message: `Template ${res.updated ? 'updated' : 'saved'} to SharePoint for job ${jobNumber}.` });
+            } else {
+                setTemplateStatus({ type: 'error', message: res?.error || 'Failed to save template.' });
+            }
+        } catch (err) {
+            setTemplateStatus({ type: 'error', message: err?.message || 'Failed to save template.' });
+        } finally {
+            setSavingTemplate(false);
+        }
+    };
+
+    // Apply a loaded template: non-empty template fields overlay the current form (so a
+    // template doesn't blank out SharePoint-prefilled customer info), and layout/schema are set.
+    const applyTemplate = (tpl) => {
+        if (!tpl) return;
+        const layout = tpl.certLayout || certLayout || 'crane-hook';
+        const schema = tpl.testSchema || null;
+        const incoming = tpl.formData || {};
+        setFormData(prev => {
+            const merged = { ...prev };
+            Object.keys(incoming).forEach(k => {
+                const v = incoming[k];
+                const isEmpty = v === '' || v === null || v === undefined || (Array.isArray(v) && v.length === 0);
+                if (!isEmpty) merged[k] = v;
+            });
+            if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { certData: merged, certLayout: layout, testSchema: schema });
+            return merged;
+        });
+        setCertLayoutState(layout);
+        setTestSchema(schema);
+        setAvailableTemplate(null);
+        setTemplateStatus({ type: 'success', message: 'Template loaded from SharePoint.' });
+    };
+
+    // On opening a job, sync its template from SharePoint. If the job has no certificate
+    // yet, apply it automatically; otherwise offer it via a banner so edits aren't clobbered.
+    // A saved template suppresses the "Generate with AI?" prompt — it takes precedence.
+    useEffect(() => {
+        const api = getElectronAPI();
+        const jobNumber = getJobNumber();
+        let cancelled = false;
+        (async () => {
+            let templateFound = false;
+            if (api.certLoadTemplate && jobNumber) {
+                try {
+                    const res = await api.certLoadTemplate(jobNumber);
+                    if (!cancelled && res?.success && res.template) {
+                        templateFound = true;
+                        if (!job?.metadata?.certData) {
+                            applyTemplate(res.template);
+                        } else {
+                            setAvailableTemplate({ template: res.template, savedAt: res.savedAt || null });
+                        }
+                    }
+                } catch (e) { /* offline or not signed in — fall through to the AI prompt */ }
+            }
+            if (cancelled) return;
+            // Only offer AI generation when the job has no saved template.
+            if (promptAiOnArrival) {
+                if (templateFound) {
+                    if (onAiPromptResolved) onAiPromptResolved();
+                } else {
+                    setShowAiPrompt(true);
+                }
+            }
+        })();
+        return () => { cancelled = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [jobId, promptAiOnArrival]);
 
     const toggleGraphPageBreak = (datasetIdx) => {
         setFormData(prev => {
@@ -2334,6 +2426,15 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <button
+                        onClick={saveAsTemplate}
+                        disabled={savingTemplate}
+                        className="action-btn"
+                        title="Save this certificate as the reusable template for this job number (SharePoint)"
+                        style={{ fontSize: '0.85rem', padding: '8px 14px', whiteSpace: 'nowrap', background: '#0f766e' }}
+                    >
+                        {savingTemplate ? 'Saving…' : '💾 Save Template'}
+                    </button>
+                    <button
                         onClick={handleResetForm}
                         className="action-btn secondary small"
                         title="Reset certificate to defaults"
@@ -2346,6 +2447,28 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     </button>
                 </div>
             </div>
+
+            {/* SharePoint template available for this job (shown when the cert already has data) */}
+            {availableTemplate && (
+                <div style={{ marginBottom: '16px', padding: '12px 16px', background: 'rgba(37,99,235,0.1)', border: '1px solid #2563eb', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '0.85rem' }}>
+                        📋 A saved template exists in SharePoint for job <strong>{getJobNumber()}</strong>
+                        {availableTemplate.savedAt ? ` (saved ${new Date(availableTemplate.savedAt).toLocaleDateString()})` : ''}.
+                    </span>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                        <button onClick={() => applyTemplate(availableTemplate.template)} className="action-btn" style={{ fontSize: '0.8rem', padding: '6px 14px', background: '#2563eb' }}>Load template</button>
+                        <button onClick={() => setAvailableTemplate(null)} className="action-btn secondary small" style={{ fontSize: '0.8rem' }}>Dismiss</button>
+                    </div>
+                </div>
+            )}
+
+            {/* Template save/load status */}
+            {templateStatus && (
+                <div style={{ marginBottom: '16px', padding: '8px 14px', borderRadius: '6px', fontSize: '0.82rem', background: templateStatus.type === 'success' ? '#dcfce7' : '#fee2e2', color: templateStatus.type === 'success' ? '#166534' : '#991b1b', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                    <span>{templateStatus.type === 'success' ? '✓ ' : '⚠ '}{templateStatus.message}</span>
+                    <button onClick={() => setTemplateStatus(null)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '1rem', color: 'inherit', lineHeight: 1 }}>×</button>
+                </div>
+            )}
 
             <div className="form-grid">
                 <section className="form-section">

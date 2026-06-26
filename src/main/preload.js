@@ -85,6 +85,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     certRegister: (entry) => ipcRenderer.invoke('cert:register', entry),
     certListRegistry: () => ipcRenderer.invoke('cert:listRegistry'),
 
+    // Job Templates (SharePoint "OSCAR Job Templates" list)
+    certSaveTemplate: (jobNumber, template) => ipcRenderer.invoke('cert:saveTemplate', jobNumber, template),
+    certLoadTemplate: (jobNumber) => ipcRenderer.invoke('cert:loadTemplate', jobNumber),
+    certListTemplates: () => ipcRenderer.invoke('cert:listTemplates'),
+
     // Customer Export
     exportCustomerPackage: (opts) => ipcRenderer.invoke('export:customerPackage', opts),
 
