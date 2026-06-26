@@ -249,6 +249,45 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         }
     };
 
+    const deleteCertificate = (idx) => {
+        if (!onUpdateMetadata || !jobId) return;
+        // Materialize the array and snapshot the active cert's live data first, so deleting
+        // another tab never loses the active certificate's in-progress edits.
+        const certs = [...(certificates.length > 0 ? certificates : [{ name: 'Certificate 1' }])];
+        while (certs.length <= activeCertIndex) certs.push({ name: `Certificate ${certs.length + 1}` });
+        certs[activeCertIndex] = { ...certs[activeCertIndex], certData: formData, certLayout, testSchema };
+        if (certs.length <= 1) return; // never delete the last certificate
+        if (idx < 0 || idx >= certs.length) return;
+
+        const target = certs[idx];
+        const label = target.name || `Certificate ${idx + 1}`;
+        const cd = target.certData;
+        const hasData = !!cd && !!((cd.soldTo || '').trim() || (cd.buyer || '').trim() || (cd.certNo || '').trim() || (cd.procedureSummary || '').trim());
+        const msg = hasData
+            ? `Delete "${label}"?\n\nThis certificate has data entered and cannot be recovered.`
+            : `Delete "${label}"?`;
+        if (!window.confirm(msg)) return;
+
+        certs.splice(idx, 1);
+        let newActive = activeCertIndex;
+        if (idx === activeCertIndex) newActive = Math.max(0, idx - 1);
+        else if (idx < activeCertIndex) newActive = activeCertIndex - 1;
+        newActive = Math.min(newActive, certs.length - 1);
+
+        const t = certs[newActive];
+        const targetData = t.certData || buildDefaultFormData();
+        const targetLayout = t.certLayout || 'crane-hook';
+        const targetSchema = t.testSchema || null;
+
+        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: newActive, certData: targetData, certLayout: targetLayout, testSchema: targetSchema });
+        setActiveCertIndex(newActive);
+        setFormData({ ...buildDefaultFormData(), ...targetData });
+        setCertLayoutState(targetLayout);
+        setTestSchema(targetSchema);
+        setCustomerSignature(null);
+        setAiMessages([]);
+    };
+
 
     const [formData, setFormData] = useState({
         soldTo: '',
@@ -1072,7 +1111,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         })();
         return () => { cancelled = true; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [jobId, promptAiOnArrival]);
+    }, [jobId]);
 
     const toggleGraphPageBreak = (datasetIdx) => {
         setFormData(prev => {
@@ -2379,6 +2418,9 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 if (name) renameCertificate(idx, name);
                             }}
                             style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '6px',
                                 padding: '6px 14px',
                                 fontSize: '0.8rem',
                                 fontWeight: idx === activeCertIndex ? 700 : 400,
@@ -2389,7 +2431,18 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 cursor: 'pointer',
                             }}
                         >
-                            {cert.name || `Certificate ${idx + 1}`}
+                            <span>{cert.name || `Certificate ${idx + 1}`}</span>
+                            {tabs.length > 1 && (
+                                <span
+                                    onClick={(e) => { e.stopPropagation(); deleteCertificate(idx); }}
+                                    title="Delete this certificate"
+                                    style={{ marginLeft: '2px', fontSize: '1rem', lineHeight: 1, opacity: 0.55, cursor: 'pointer', padding: '0 3px', borderRadius: '3px' }}
+                                    onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = '#dc2626'; }}
+                                    onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.55'; e.currentTarget.style.color = 'inherit'; }}
+                                >
+                                    ×
+                                </span>
+                            )}
                         </button>
                     ));
                 })()}
