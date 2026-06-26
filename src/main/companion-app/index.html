@@ -1077,9 +1077,12 @@
                     let certsHtml = '';
                     if (item.certificates && item.certificates.length > 0) {
                         certsHtml = '<div class="equip-item-certs">' +
-                            item.certificates.map(c =>
-                                `<a class="equip-cert-link" href="${escapeHtml(c.url)}" target="_blank" rel="noopener">${escapeHtml(c.name)}</a>`
-                            ).join('') +
+                            item.certificates.map(c => {
+                                // Certs are served from the token-gated /api; a tapped link carries no auth
+                                // header, so append the session token as ?t= so the request is authorized.
+                                const certUrl = c.url + (c.url.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(AUTH_TOKEN);
+                                return `<a class="equip-cert-link" href="${escapeHtml(certUrl)}" target="_blank" rel="noopener">${escapeHtml(c.name)}</a>`;
+                            }).join('') +
                         '</div>';
                     } else {
                         certsHtml = '<div class="equip-item-certs equip-no-certs">No certificates on file</div>';
