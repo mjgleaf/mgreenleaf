@@ -3,228 +3,74 @@ import ErrorBoundary from './ErrorBoundary';
 import LiveGraph from './LiveGraph';
 import { getElectronAPI } from '../utils/electronAPI';
 
-function LiveView({
+const formatElapsed = (ms) => {
+    const totalSec = Math.max(0, Math.round(ms / 1000));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
+// One independent recording session (a single load test). Rendered once in
+// normal mode and twice (Test A + Test B) when dual-test mode is on. Each panel
+// owns its own cell assignment, logged buffer, markers and peak hold; the parent
+// LiveView feeds them all from one shared telemetry stream.
+function TestPanel({
+    label,
     status,
-    onSaveLog,
-    selectedJob,
-    recoveryData,
     devices,
+    allTags,
+    excludeTags,
     selectedTags,
     setSelectedTags,
     cellCount,
     setCellCount,
     isLogging,
-    setIsLogging,
     loggedData,
-    setLoggedData,
     markers,
     setMarkers,
-    logInterval,
-    setLogInterval,
-    keepAwake,
-    setKeepAwake,
-    previewData,
-    setPreviewData,
+    onStart,
+    onStop,
+    overloadTags,
+    getSignalStatus,
+    getSignalLabel,
+    onZero,
+    onClearZeros,
     displayUnit,
     onUnitChange,
     xUnit,
     onXUnitChange,
-    companionRunning,
-    companionClients,
-    onStartCompanion,
-    onOpenCompanion
+    selectedJob,
+    jobNumberLabel,
+    previewData,
 }) {
-    const [showJobPrompt, setShowJobPrompt] = useState(false);
-    const [jobInput, setJobInput] = useState('');
     const [error, setError] = useState('');
 
-    // Feature: Overload Alarm
-    const [wllThreshold, setWllThreshold] = useState(0);
-    const [overloadTags, setOverloadTags] = useState(new Set());
-    const overloadAudioRef = useRef(null);
-    const wllThresholdRef = useRef(0);
-
-    // Feature: Peak Hold
+    // Peak hold — local to this test so starting one test doesn't reset the
+    // other test's peaks.
     const [peakValues, setPeakValues] = useState({});
     const peakValuesRef = useRef({});
 
-    // Feature: Signal Strength
-    const [lastPacketTimes, setLastPacketTimes] = useState({});
-
-    // Feature: Auto-save
-    const [lastAutosave, setLastAutosave] = useState(null);
-    const autosaveTimerRef = useRef(null);
-
-    useEffect(() => { wllThresholdRef.current = wllThreshold; }, [wllThreshold]);
-
-    // Audio context for overload alarm
+    // Reset peaks whenever this test's logging state flips.
     useEffect(() => {
-        const AudioContext = window.AudioContext || window.webkitAudioContext;
-        if (AudioContext) overloadAudioRef.current = new AudioContext();
-        return () => { if (overloadAudioRef.current) overloadAudioRef.current.close(); };
-    }, []);
-
-    const playOverloadBeep = useCallback(() => {
-        const ctx = overloadAudioRef.current;
-        if (!ctx || ctx.state === 'suspended') { ctx?.resume(); return; }
-        try {
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.type = 'square';
-            osc.frequency.value = 880;
-            gain.gain.value = 0.3;
-            osc.start();
-            osc.stop(ctx.currentTime + 0.15);
-        } catch (e) { }
-    }, []);
-
-    useEffect(() => {
-        if (selectedJob?.QuoteNum) {
-            setJobInput(selectedJob.QuoteNum);
-        }
-    }, [selectedJob]);
-
-    const recoveryAppliedRef = useRef(false);
-    useEffect(() => {
-        if (recoveryData && recoveryData.length > 0 && !recoveryAppliedRef.current) {
-            setLoggedData(recoveryData);
-            setIsLogging(true);
-            const recoveryTags = Array.from(new Set(recoveryData.map(d => d.Tag)));
-            if (recoveryTags.length > 0) {
-                const nextTags = [...selectedTags];
-                recoveryTags.slice(0, 10).forEach((tag, i) => {
-                    nextTags[i] = tag;
-                });
-                setSelectedTags(nextTags);
-                setCellCount(Math.max(cellCount, recoveryTags.length));
-            }
-            recoveryAppliedRef.current = true;
-        }
-    }, [recoveryData]);
-
-    // Track overload + peak + signal from live data
-    useEffect(() => {
-        if (!devices) return;
-        const now = Date.now();
-        Object.entries(devices).forEach(([tag, packet]) => {
-            // Signal tracking
-            setLastPacketTimes(prev => ({ ...prev, [tag]: packet.timestamp || now }));
-
-            // Overload check
-            if (wllThresholdRef.current > 0 && Math.abs(packet.value) > wllThresholdRef.current) {
-                setOverloadTags(prev => { const next = new Set(prev); next.add(tag); return next; });
-                playOverloadBeep();
-            } else {
-                setOverloadTags(prev => {
-                    if (prev.has(tag)) { const next = new Set(prev); next.delete(tag); return next; }
-                    return prev;
-                });
-            }
-
-            // Peak tracking during logging
-            if (isLogging) {
-                const currentPeak = peakValuesRef.current[tag] || 0;
-                if (Math.abs(packet.value) > Math.abs(currentPeak)) {
-                    peakValuesRef.current[tag] = packet.value;
-                    setPeakValues({ ...peakValuesRef.current });
-                }
-            }
-        });
-    }, [devices, isLogging, playOverloadBeep]);
-
-    // Signal indicator refresh
-    useEffect(() => {
-        const interval = setInterval(() => setLastPacketTimes(prev => ({ ...prev })), 1000);
-        return () => clearInterval(interval);
-    }, []);
-
-    const tags = Object.keys(devices);
-
-    const startLogging = () => {
-        // Data validation: need at least one cell assigned
-        const activeTags = selectedTags.slice(0, cellCount).filter(t => t);
-        if (activeTags.length === 0) {
-            setError('Please assign at least one load cell before recording.');
-            return;
-        }
-        setLoggedData([]);
-        setMarkers([]);
-        setIsLogging(true);
-        setError('');
-        // Reset peak hold
         peakValuesRef.current = {};
         setPeakValues({});
-        if (getElectronAPI().startSafetyLog) {
-            getElectronAPI().startSafetyLog(logInterval);
-        }
-        // Start auto-save timer
-        if (autosaveTimerRef.current) clearInterval(autosaveTimerRef.current);
-        autosaveTimerRef.current = setInterval(() => {
-            performAutosave();
-        }, 60000);
-    };
+    }, [isLogging]);
 
-    const stopLogging = async () => {
-        setIsLogging(false);
-        if (getElectronAPI().stopSafetyLog) {
-            getElectronAPI().stopSafetyLog();
-        }
-        // Stop auto-save
-        if (autosaveTimerRef.current) { clearInterval(autosaveTimerRef.current); autosaveTimerRef.current = null; }
-
-        if (loggedData.length === 0) {
-            setError('No data was recorded. Nothing to save.');
-            return;
-        }
-
-        const jobNumber = selectedJob?.QuoteNum || jobInput || 'test_data';
-
-        if (selectedJob?.QuoteNum) {
-            const metadata = {
-                customer: selectedJob.Customer,
-                leadCompany: selectedJob.LeadCompany,
-                poDate: selectedJob.PODate,
-                poNumber: selectedJob.PONumber,
-                markers
-            };
-            onSaveLog(loggedData, selectedJob.QuoteNum, metadata);
-
-            if (loggedData.length > 0) {
-                await getElectronAPI().saveCSV(loggedData, selectedJob.QuoteNum);
+    // Track peak per assigned cell while recording.
+    useEffect(() => {
+        if (!isLogging) return;
+        const activeTags = selectedTags.slice(0, cellCount);
+        let changed = false;
+        activeTags.forEach(tag => {
+            if (!tag || !devices[tag]) return;
+            const current = peakValuesRef.current[tag] || 0;
+            if (Math.abs(devices[tag].value) > Math.abs(current)) {
+                peakValuesRef.current[tag] = devices[tag].value;
+                changed = true;
             }
-
-            setLoggedData([]);
-            setMarkers([]);
-        } else {
-            setShowJobPrompt(true);
-        }
-    };
-
-    const performAutosave = useCallback(() => {
-        const api = getElectronAPI();
-        if (!api.autosaveSession) return;
-        setLoggedData(current => {
-            if (current.length > 0) {
-                api.autosaveSession({
-                    name: selectedJob?.QuoteNum || jobInput || 'service-autosave',
-                    data: current,
-                    meta: { peakValues: { ...peakValuesRef.current } }
-                });
-                setLastAutosave(new Date());
-            }
-            return current;
         });
-    }, [selectedJob, jobInput]);
-
-    // ── Test-phase markers (function test / static hold) ──
-    const formatElapsed = (ms) => {
-        const totalSec = Math.max(0, Math.round(ms / 1000));
-        const m = Math.floor(totalSec / 60);
-        const s = totalSec % 60;
-        return `${m}:${s.toString().padStart(2, '0')}`;
-    };
+        if (changed) setPeakValues({ ...peakValuesRef.current });
+    }, [devices, isLogging, selectedTags, cellCount]);
 
     const isPhaseOpen = (phase) => {
         const ph = markers.filter(m => m.phase === phase);
@@ -243,37 +89,21 @@ function LiveView({
         }]);
     };
 
-    const undoLastMarker = () => {
-        setMarkers(prev => prev.slice(0, -1));
-    };
+    const undoLastMarker = () => setMarkers(prev => prev.slice(0, -1));
 
-    const handleSave = async () => {
-        const regex = /^HWI-\d{2}-\d{3}$/i;
-        if (!regex.test(jobInput)) {
-            setError('Invalid Format. Use HWI-XX-XXX (e.g., HWI-24-001)');
+    const handleStartClick = () => {
+        const activeTags = selectedTags.slice(0, cellCount).filter(t => t);
+        if (activeTags.length === 0) {
+            setError(`Please assign at least one load cell${label ? ` to ${label}` : ''} before recording.`);
             return;
         }
-
-        const upperJob = jobInput.toUpperCase();
-        onSaveLog(loggedData, upperJob, { markers });
-
-        if (loggedData.length > 0) {
-            await getElectronAPI().saveCSV(loggedData, upperJob);
-        }
-
-        setShowJobPrompt(false);
-        setJobInput('');
         setError('');
-        setLoggedData([]);
-        setMarkers([]);
+        onStart();
     };
 
-    const cancelSave = () => {
-        setShowJobPrompt(false);
-        setJobInput('');
-        setError('');
-        setLoggedData([]);
-        setMarkers([]);
+    const handleStopClick = async () => {
+        const err = await onStop();
+        if (err) setError(err);
     };
 
     const handleTagChange = (index, value) => {
@@ -282,90 +112,44 @@ function LiveView({
         setSelectedTags(newTags);
     };
 
-    const toggleKeepAwake = async () => {
-        const newState = !keepAwake;
-        setKeepAwake(newState);
-        await getElectronAPI().toggleKeepAwake(newState);
-    };
+    const activeTags = selectedTags.slice(0, cellCount);
+    const assignedCount = activeTags.filter(t => t).length;
 
-    const handleZero = (tag) => {
-        if (!tag) return;
-        getElectronAPI().tare(tag);
-    };
-
-    const handleWakeSensors = async () => {
-        if (getElectronAPI().wakeSensors) {
-            await getElectronAPI().wakeSensors();
-        }
-    };
-
-    const clearAllTares = () => {
-        selectedTags.slice(0, cellCount).forEach(tag => {
-            if (tag) getElectronAPI().clearTare(tag);
-        });
-    };
-
-    // Signal status helpers
-    const getSignalStatus = (tag) => {
-        if (!tag || !lastPacketTimes[tag]) return 'stale';
-        const elapsed = Date.now() - lastPacketTimes[tag];
-        if (elapsed < 2000) return 'live';
-        if (elapsed < 5000) return 'heartbeat';
-        return 'stale';
-    };
-
-    const getSignalLabel = (tag) => {
-        if (!tag || !lastPacketTimes[tag]) return 'No signal';
-        const elapsed = Date.now() - lastPacketTimes[tag];
-        if (elapsed < 2000) return 'Live';
-        return `${(elapsed / 1000).toFixed(0)}s ago`;
-    };
-
-    const totalLbs = selectedTags.slice(0, cellCount).reduce((acc, tag) => {
-        if (tag && devices[tag]) {
-            return acc + devices[tag].value;
-        }
+    const totalLbs = activeTags.reduce((acc, tag) => {
+        if (tag && devices[tag]) return acc + devices[tag].value;
         return acc;
     }, 0);
-
     const shortTons = totalLbs / 2000;
     const metricTons = totalLbs * 0.00045359237;
     const totalPeak = Object.values(peakValues).reduce((acc, v) => acc + Math.abs(v), 0);
 
+    // Only show this test's own cells in the preview graph.
+    const panelPreview = previewData.filter(p => activeTags.includes(p.Tag));
+
+    // Cells the dropdown should offer: everything except cells claimed by the
+    // other test (but always keep this slot's current pick visible).
+    const optionTags = (currentTag) => allTags.filter(tag => !excludeTags.includes(tag) || tag === currentTag);
+
     return (
-        <div className="live-view-container">
-            {/* Status banners — always show controls regardless of connection */}
-            {status === 'disconnected' && (
-                <div style={{
-                    background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.3)',
-                    color: '#f87171', padding: '8px 16px', borderRadius: 'var(--radius-sm)',
-                    fontSize: '0.82rem', fontWeight: 600, marginBottom: 12, textAlign: 'center',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
-                }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', display: 'inline-block' }}></span>
-                    Dongle Disconnected — Plug in your T24 USB dongle to stream live data
-                </div>
-            )}
-
-            {status === 'connected' && tags.length === 0 && (
-                <div style={{
-                    background: 'rgba(251, 191, 36, 0.1)', border: '1px solid rgba(251, 191, 36, 0.25)',
-                    color: '#fbbf24', padding: '8px 16px', borderRadius: 'var(--radius-sm)',
-                    fontSize: '0.82rem', fontWeight: 600, marginBottom: 12, textAlign: 'center',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
-                }}>
-                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#fbbf24', display: 'inline-block' }}></span>
-                    Dongle connected — Waiting for transmitter signals...
-                    <button onClick={handleWakeSensors} className="action-btn" style={{ fontSize: '0.78rem', padding: '4px 12px', marginLeft: 8 }}>
-                        Wake All Sensors
-                    </button>
-                </div>
-            )}
-
-            {/* Overload banner */}
-            {overloadTags.size > 0 && (
-                <div className="overload-banner">
-                    OVERLOAD WARNING — {[...overloadTags].map(t => `Cell ${t}`).join(', ')} exceeding WLL of {wllThreshold.toLocaleString()} lbs!
+        <div className={`test-panel${label ? ' dual' : ''}`} style={label ? {
+            border: '1px solid var(--border)', borderRadius: 'var(--radius-md, 12px)',
+            padding: '14px', background: 'rgba(255,255,255,0.02)'
+        } : {}}>
+            {label && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                    <span style={{
+                        fontWeight: 800, fontSize: '0.95rem', letterSpacing: '0.04em',
+                        color: 'var(--yellow-accent)', background: 'rgba(240,184,0,0.12)',
+                        border: '1px solid rgba(240,184,0,0.3)', padding: '3px 12px', borderRadius: 999
+                    }}>{label}</span>
+                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                        {assignedCount} cell{assignedCount !== 1 ? 's' : ''} assigned
+                    </span>
+                    {isLogging && (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: '0.78rem', color: 'var(--green)', fontWeight: 700 }}>
+                            <span className="pulse-dot"></span> Recording — {loggedData.length}
+                        </span>
+                    )}
                 </div>
             )}
 
@@ -379,110 +163,42 @@ function LiveView({
                 </div>
             )}
 
-            <div className="live-header">
-                <div className="live-badge">LIVE MULTI-LINK</div>
-                <div className="serial-box">
-                    <span className="label">NUMBER OF CELLS</span>
-                    <select className="cell-count-dropdown" value={cellCount}
-                        onChange={(e) => setCellCount(parseInt(e.target.value))} disabled={isLogging}>
-                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
-                            <option key={n} value={n}>{n} Cell{n > 1 ? 's' : ''}</option>
-                        ))}
-                    </select>
-                </div>
-                <div className="serial-box">
-                    <span className="label">SIGNAL STATUS</span>
-                    <span className="value">
-                        {status === 'connected' ? `CONNECTED (${selectedTags.slice(0, cellCount).filter(t => t).length} Cells)` : 'DISCONNECTED'}
-                    </span>
-                </div>
-                <div className="serial-box">
-                    <span className="label">SAMPLE RATE</span>
-                    <select className="cell-count-dropdown" value={logInterval}
-                        onChange={(e) => setLogInterval(parseInt(e.target.value))} disabled={isLogging}>
-                        <option value={0}>Continuous (Real-time)</option>
-                        <option value={1000}>1 Second</option>
-                        <option value={10000}>10 Seconds</option>
-                        <option value={30000}>30 Seconds</option>
-                        <option value={60000}>1 Minute</option>
-                        <option value={300000}>5 Minutes</option>
-                        <option value={600000}>10 Minutes</option>
-                    </select>
-                </div>
-                <div className="serial-box">
-                    <span className="label">OVERLOAD ALARM (WLL)</span>
-                    <div className="wll-input-group">
-                        <input type="number" value={wllThreshold || ''} placeholder="Off"
-                            onChange={(e) => setWllThreshold(parseFloat(e.target.value) || 0)}
-                            style={{ width: '80px' }} />
-                        <span>lbs</span>
-                    </div>
-                </div>
-                <div className="serial-box">
-                    <span className="label">COMPANION APP</span>
-                    {companionRunning ? (
-                        <button
-                            onClick={onOpenCompanion}
-                            className="action-btn secondary"
-                            style={{ fontSize: '0.78rem', padding: '4px 12px', whiteSpace: 'nowrap' }}
-                            title="Companion server is running — tap to view the phone connection link"
-                        >
-                            📱 Running{companionClients > 0 ? ` (${companionClients})` : ''} — Show Link
-                        </button>
-                    ) : (
-                        <button
-                            onClick={onStartCompanion}
-                            className="action-btn"
-                            style={{ fontSize: '0.78rem', padding: '4px 12px', whiteSpace: 'nowrap' }}
-                            title="Start the companion server so field crew can watch live data on their phones"
-                        >
-                            📱 Start Server
-                        </button>
-                    )}
-                </div>
+            <div className="serial-box" style={{ marginBottom: 12, display: 'inline-flex' }}>
+                <span className="label">NUMBER OF CELLS</span>
+                <select className="cell-count-dropdown" value={cellCount}
+                    onChange={(e) => setCellCount(parseInt(e.target.value))} disabled={isLogging}>
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+                        <option key={n} value={n}>{n} Cell{n > 1 ? 's' : ''}</option>
+                    ))}
+                </select>
             </div>
 
             <div className="main-stats">
                 <div className="primary-stat">
-                    <div className="stat-unit">TOTAL LOAD (Lbs)</div>
+                    <div className="stat-unit">TOTAL LOAD (Lbs){label ? ` — ${label}` : ''}</div>
                     <div className="stat-big-value">{totalLbs.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</div>
                 </div>
 
                 <div className="logging-controls mt-2">
                     {!isLogging ? (
                         <div className="control-row">
-                            <button onClick={startLogging} className="action-btn large record-btn"
+                            <button onClick={handleStartClick} className="action-btn large record-btn"
                                 disabled={status === 'disconnected'}>
-                                <span className="dot"></span> Start Logging Multi-Data
+                                <span className="dot"></span> {label ? `Start ${label}` : 'Start Logging Multi-Data'}
                             </button>
-                            <button onClick={clearAllTares} className="action-btn secondary ml-4">
-                                Clear All Zeros
+                            <button onClick={onClearZeros} className="action-btn secondary ml-4">
+                                Clear Zeros
                             </button>
-                            <button onClick={handleWakeSensors} className="action-btn secondary ml-4" title="Sends an aggressive broadcast to wake all nearby sensors">
-                                Wake All Sensors
-                            </button>
-                            <div className="keep-awake-container ml-auto">
-                                <label className="awake-label">
-                                    <input type="checkbox" checked={keepAwake} onChange={toggleKeepAwake} />
-                                    KEEP TRANSMITTERS AWAKE
-                                </label>
-                            </div>
                         </div>
                     ) : (
                         <>
                             <div className="logging-active-group">
-                                <button onClick={stopLogging} className="action-btn large stop-btn">
-                                    <span className="square"></span> Stop & Save Project
+                                <button onClick={handleStopClick} className="action-btn large stop-btn">
+                                    <span className="square"></span> {label ? `Stop & Save ${label}` : 'Stop & Save Project'}
                                 </button>
                                 <div className="logging-status">
                                     <span className="pulse-dot"></span>
                                     Recording: {loggedData.length} samples collected
-                                    {lastAutosave && (
-                                        <span className="autosave-indicator">
-                                            <span className="check">&#10003;</span>
-                                            Auto-saved {lastAutosave.toLocaleTimeString()}
-                                        </span>
-                                    )}
                                 </div>
                             </div>
 
@@ -533,7 +249,7 @@ function LiveView({
             </div>
 
             <div className="load-cells-grid">
-                {selectedTags.slice(0, cellCount).map((selectedTag, index) => {
+                {activeTags.map((selectedTag, index) => {
                     const packet = selectedTag ? devices[selectedTag] : null;
                     const isOverload = selectedTag && overloadTags.has(selectedTag);
                     const signalStatus = getSignalStatus(selectedTag);
@@ -547,7 +263,7 @@ function LiveView({
                                 <select className="slot-dropdown" value={selectedTag || 'none'}
                                     onChange={(e) => handleTagChange(index, e.target.value)} disabled={isLogging}>
                                     <option value="none">-- Unassigned --</option>
-                                    {tags.map(tag => (
+                                    {optionTags(selectedTag).map(tag => (
                                         <option key={tag} value={tag}>Tag: {tag}</option>
                                     ))}
                                 </select>
@@ -558,7 +274,6 @@ function LiveView({
                                 </div>
                                 <div className="slot-unit">Lbs</div>
 
-                                {/* Peak hold */}
                                 {peak !== null && peak !== undefined && (
                                     <div className="peak-hold">
                                         <span className="peak-label">Peak:</span>
@@ -568,7 +283,6 @@ function LiveView({
                                     </div>
                                 )}
 
-                                {/* Signal indicator */}
                                 {selectedTag && (
                                     <div className="signal-indicator">
                                         <span className={`signal-dot ${signalStatus}`}></span>
@@ -577,7 +291,7 @@ function LiveView({
                                 )}
 
                                 {selectedTag && (
-                                    <button className="zero-btn" onClick={() => handleZero(selectedTag)} disabled={isLogging}>
+                                    <button className="zero-btn" onClick={() => onZero(selectedTag)} disabled={isLogging}>
                                         Zero
                                     </button>
                                 )}
@@ -586,31 +300,6 @@ function LiveView({
                     );
                 })}
             </div>
-
-            {showJobPrompt && (
-                <div className="modal-overlay">
-                    <div className="job-prompt-card">
-                        <h3>Save to Projects</h3>
-                        <p>Complete the recording by assigning a Job Number.</p>
-                        <div className="form-group mt-4">
-                            <label>Job Number (Format: HWI-XX-XXX)</label>
-                            <input
-                                type="text"
-                                value={jobInput}
-                                onChange={(e) => { setJobInput(e.target.value); setError(''); }}
-                                placeholder="HWI-24-001"
-                                className={`large-input ${error ? 'error-border' : ''}`}
-                                autoFocus
-                            />
-                            {error && <div className="error-text">{error}</div>}
-                        </div>
-                        <div className="form-actions mt-4">
-                            <button onClick={handleSave} className="action-btn">Save Project</button>
-                            <button onClick={cancelSave} className="action-btn secondary ml-4">Discard</button>
-                        </div>
-                    </div>
-                </div>
-            )}
 
             <div className="secondary-stats-grid mt-4">
                 <div className="stat-card accent">
@@ -633,17 +322,540 @@ function LiveView({
 
             <ErrorBoundary>
                 <LiveGraph
-                    data={isLogging ? loggedData : previewData}
+                    data={isLogging ? loggedData : panelPreview}
                     markers={isLogging ? markers : []}
-                    activeTags={selectedTags.slice(0, cellCount)}
+                    activeTags={activeTags}
                     companyName={selectedJob?.LeadCompany || selectedJob?.Customer}
-                    jobNumber={jobInput || selectedJob?.QuoteNum}
+                    jobNumber={jobNumberLabel}
                     displayUnit={displayUnit}
                     onUnitChange={onUnitChange}
                     xUnit={xUnit}
                     onXUnitChange={onXUnitChange}
                 />
             </ErrorBoundary>
+        </div>
+    );
+}
+
+function LiveView({
+    status,
+    onSaveLog,
+    selectedJob,
+    recoveryData,
+    devices,
+    dualMode,
+    setDualMode,
+    selectedTags,
+    setSelectedTags,
+    cellCount,
+    setCellCount,
+    isLogging,
+    setIsLogging,
+    loggedData,
+    setLoggedData,
+    markers,
+    setMarkers,
+    selectedTagsB,
+    setSelectedTagsB,
+    cellCountB,
+    setCellCountB,
+    isLoggingB,
+    setIsLoggingB,
+    loggedDataB,
+    setLoggedDataB,
+    markersB,
+    setMarkersB,
+    logInterval,
+    setLogInterval,
+    keepAwake,
+    setKeepAwake,
+    previewData,
+    setPreviewData,
+    displayUnit,
+    onUnitChange,
+    xUnit,
+    onXUnitChange,
+    companionRunning,
+    companionClients,
+    onStartCompanion,
+    onOpenCompanion
+}) {
+    const [showJobPrompt, setShowJobPrompt] = useState(false);
+    const [jobInput, setJobInput] = useState('');
+    const [error, setError] = useState('');
+    // Data of a stopped test awaiting a manually-entered job number (only used
+    // when no SharePoint job is selected).
+    const [pendingPrompt, setPendingPrompt] = useState(null);
+
+    // Feature: Overload Alarm
+    const [wllThreshold, setWllThreshold] = useState(0);
+    const [overloadTags, setOverloadTags] = useState(new Set());
+    const overloadAudioRef = useRef(null);
+    const wllThresholdRef = useRef(0);
+
+    // Feature: Signal Strength
+    const [lastPacketTimes, setLastPacketTimes] = useState({});
+
+    // Feature: Auto-save (one rolling timer per test)
+    const [lastAutosave, setLastAutosave] = useState(null);
+    const autosaveRefA = useRef(null);
+    const autosaveRefB = useRef(null);
+
+    useEffect(() => { wllThresholdRef.current = wllThreshold; }, [wllThreshold]);
+
+    // Audio context for overload alarm
+    useEffect(() => {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (AudioContext) overloadAudioRef.current = new AudioContext();
+        return () => { if (overloadAudioRef.current) overloadAudioRef.current.close(); };
+    }, []);
+
+    const playOverloadBeep = useCallback(() => {
+        const ctx = overloadAudioRef.current;
+        if (!ctx || ctx.state === 'suspended') { ctx?.resume(); return; }
+        try {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.type = 'square';
+            osc.frequency.value = 880;
+            gain.gain.value = 0.3;
+            osc.start();
+            osc.stop(ctx.currentTime + 0.15);
+        } catch (e) { }
+    }, []);
+
+    useEffect(() => {
+        if (selectedJob?.QuoteNum) setJobInput(selectedJob.QuoteNum);
+    }, [selectedJob]);
+
+    // Crash recovery restores into Test A (the primary session).
+    const recoveryAppliedRef = useRef(false);
+    useEffect(() => {
+        if (recoveryData && recoveryData.length > 0 && !recoveryAppliedRef.current) {
+            setLoggedData(recoveryData);
+            setIsLogging(true);
+            const recoveryTags = Array.from(new Set(recoveryData.map(d => d.Tag)));
+            if (recoveryTags.length > 0) {
+                const nextTags = [...selectedTags];
+                recoveryTags.slice(0, 10).forEach((tag, i) => { nextTags[i] = tag; });
+                setSelectedTags(nextTags);
+                setCellCount(Math.max(cellCount, recoveryTags.length));
+            }
+            recoveryAppliedRef.current = true;
+        }
+    }, [recoveryData]);
+
+    // Track overload + signal from live data (global across all cells).
+    useEffect(() => {
+        if (!devices) return;
+        const now = Date.now();
+        Object.entries(devices).forEach(([tag, packet]) => {
+            setLastPacketTimes(prev => ({ ...prev, [tag]: packet.timestamp || now }));
+
+            if (wllThresholdRef.current > 0 && Math.abs(packet.value) > wllThresholdRef.current) {
+                setOverloadTags(prev => { const next = new Set(prev); next.add(tag); return next; });
+                playOverloadBeep();
+            } else {
+                setOverloadTags(prev => {
+                    if (prev.has(tag)) { const next = new Set(prev); next.delete(tag); return next; }
+                    return prev;
+                });
+            }
+        });
+    }, [devices, playOverloadBeep]);
+
+    // Signal indicator refresh
+    useEffect(() => {
+        const interval = setInterval(() => setLastPacketTimes(prev => ({ ...prev })), 1000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const tags = Object.keys(devices);
+
+    const performAutosave = useCallback((ctx) => {
+        const api = getElectronAPI();
+        if (!api.autosaveSession) return;
+        const baseName = selectedJob?.QuoteNum || jobInput || 'service-autosave';
+        const name = ctx.label ? `${baseName} — ${ctx.label}` : baseName;
+        ctx.setLoggedData(current => {
+            if (current.length > 0) {
+                api.autosaveSession({ name, data: current, meta: {} });
+                setLastAutosave(new Date());
+            }
+            return current;
+        });
+    }, [selectedJob, jobInput]);
+
+    const startTest = (ctx) => {
+        ctx.setLoggedData([]);
+        ctx.setMarkers([]);
+        ctx.setIsLogging(true);
+        // The single shared safety log spans the whole recording window: start it
+        // when the first test begins, stop it when the last test ends.
+        if (!ctx.otherIsLogging && getElectronAPI().startSafetyLog) {
+            getElectronAPI().startSafetyLog(logInterval);
+        }
+        if (ctx.autosaveRef.current) clearInterval(ctx.autosaveRef.current);
+        ctx.autosaveRef.current = setInterval(() => performAutosave(ctx), 60000);
+    };
+
+    // Returns an error string to show in the panel, or null on success / when a
+    // job-number prompt is opened instead.
+    const stopTest = async (ctx) => {
+        ctx.setIsLogging(false);
+        if (!ctx.otherIsLogging && getElectronAPI().stopSafetyLog) {
+            getElectronAPI().stopSafetyLog();
+        }
+        if (ctx.autosaveRef.current) { clearInterval(ctx.autosaveRef.current); ctx.autosaveRef.current = null; }
+
+        const data = ctx.loggedData;
+        const testMarkers = ctx.markers;
+        if (!data || data.length === 0) {
+            return 'No data was recorded. Nothing to save.';
+        }
+
+        if (selectedJob?.QuoteNum) {
+            const metadata = {
+                customer: selectedJob.Customer,
+                leadCompany: selectedJob.LeadCompany,
+                poDate: selectedJob.PODate,
+                poNumber: selectedJob.PONumber,
+                markers: testMarkers,
+                ...(ctx.label ? { fileName: ctx.label } : {})
+            };
+            onSaveLog(data, selectedJob.QuoteNum, metadata);
+            const csvName = ctx.label ? `${selectedJob.QuoteNum}-${ctx.label.replace(/\s+/g, '')}` : selectedJob.QuoteNum;
+            await getElectronAPI().saveCSV(data, csvName);
+            ctx.setLoggedData([]);
+            ctx.setMarkers([]);
+            return null;
+        }
+
+        // No SharePoint job — collect a job number via the modal.
+        setPendingPrompt({
+            data,
+            markers: testMarkers,
+            label: ctx.label,
+            clear: () => { ctx.setLoggedData([]); ctx.setMarkers([]); }
+        });
+        setShowJobPrompt(true);
+        return null;
+    };
+
+    const handleSave = async () => {
+        const regex = /^HWI-\d{2}-\d{3}$/i;
+        if (!regex.test(jobInput)) {
+            setError('Invalid Format. Use HWI-XX-XXX (e.g., HWI-24-001)');
+            return;
+        }
+        const upperJob = jobInput.toUpperCase();
+        const p = pendingPrompt;
+        if (p) {
+            onSaveLog(p.data, upperJob, { markers: p.markers, ...(p.label ? { fileName: p.label } : {}) });
+            await getElectronAPI().saveCSV(p.data, p.label ? `${upperJob}-${p.label.replace(/\s+/g, '')}` : upperJob);
+            p.clear?.();
+        }
+        setShowJobPrompt(false);
+        setJobInput('');
+        setError('');
+        setPendingPrompt(null);
+    };
+
+    const cancelSave = () => {
+        pendingPrompt?.clear?.();
+        setShowJobPrompt(false);
+        setJobInput('');
+        setError('');
+        setPendingPrompt(null);
+    };
+
+    const toggleKeepAwake = async () => {
+        const newState = !keepAwake;
+        setKeepAwake(newState);
+        await getElectronAPI().toggleKeepAwake(newState);
+    };
+
+    const handleZero = (tag) => {
+        if (!tag) return;
+        getElectronAPI().tare(tag);
+    };
+
+    const handleWakeSensors = async () => {
+        if (getElectronAPI().wakeSensors) await getElectronAPI().wakeSensors();
+    };
+
+    const clearZerosFor = (tagsToClear) => {
+        tagsToClear.forEach(tag => { if (tag) getElectronAPI().clearTare(tag); });
+    };
+
+    const getSignalStatus = (tag) => {
+        if (!tag || !lastPacketTimes[tag]) return 'stale';
+        const elapsed = Date.now() - lastPacketTimes[tag];
+        if (elapsed < 2000) return 'live';
+        if (elapsed < 5000) return 'heartbeat';
+        return 'stale';
+    };
+
+    const getSignalLabel = (tag) => {
+        if (!tag || !lastPacketTimes[tag]) return 'No signal';
+        const elapsed = Date.now() - lastPacketTimes[tag];
+        if (elapsed < 2000) return 'Live';
+        return `${(elapsed / 1000).toFixed(0)}s ago`;
+    };
+
+    const anyLogging = isLogging || (dualMode && isLoggingB);
+    const totalAssigned = selectedTags.slice(0, cellCount).filter(t => t).length
+        + (dualMode ? selectedTagsB.slice(0, cellCountB).filter(t => t).length : 0);
+
+    const tagsA = selectedTags.slice(0, cellCount).filter(Boolean);
+    const tagsB = dualMode ? selectedTagsB.slice(0, cellCountB).filter(Boolean) : [];
+
+    const handleToggleDual = () => {
+        if (anyLogging) return; // don't change layout mid-recording
+        setDualMode(!dualMode);
+    };
+
+    const jobNumberLabel = jobInput || selectedJob?.QuoteNum;
+
+    return (
+        <div className="live-view-container">
+            {/* Status banners — always show controls regardless of connection */}
+            {status === 'disconnected' && (
+                <div style={{
+                    background: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#f87171', padding: '8px 16px', borderRadius: 'var(--radius-sm)',
+                    fontSize: '0.82rem', fontWeight: 600, marginBottom: 12, textAlign: 'center',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
+                }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', display: 'inline-block' }}></span>
+                    Dongle Disconnected — Plug in your T24 USB dongle to stream live data
+                </div>
+            )}
+
+            {status === 'connected' && tags.length === 0 && (
+                <div style={{
+                    background: 'rgba(251, 191, 36, 0.1)', border: '1px solid rgba(251, 191, 36, 0.25)',
+                    color: '#fbbf24', padding: '8px 16px', borderRadius: 'var(--radius-sm)',
+                    fontSize: '0.82rem', fontWeight: 600, marginBottom: 12, textAlign: 'center',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8
+                }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#fbbf24', display: 'inline-block' }}></span>
+                    Dongle connected — Waiting for transmitter signals...
+                    <button onClick={handleWakeSensors} className="action-btn" style={{ fontSize: '0.78rem', padding: '4px 12px', marginLeft: 8 }}>
+                        Wake All Sensors
+                    </button>
+                </div>
+            )}
+
+            {/* Overload banner */}
+            {overloadTags.size > 0 && (
+                <div className="overload-banner">
+                    OVERLOAD WARNING — {[...overloadTags].map(t => `Cell ${t}`).join(', ')} exceeding WLL of {wllThreshold.toLocaleString()} lbs!
+                </div>
+            )}
+
+            <div className="live-header">
+                <div className="live-badge">LIVE MULTI-LINK</div>
+                <div className="serial-box">
+                    <span className="label">SIGNAL STATUS</span>
+                    <span className="value">
+                        {status === 'connected' ? `CONNECTED (${totalAssigned} Cells)` : 'DISCONNECTED'}
+                    </span>
+                </div>
+                <div className="serial-box">
+                    <span className="label">SAMPLE RATE</span>
+                    <select className="cell-count-dropdown" value={logInterval}
+                        onChange={(e) => setLogInterval(parseInt(e.target.value))} disabled={anyLogging}>
+                        <option value={0}>Continuous (Real-time)</option>
+                        <option value={1000}>1 Second</option>
+                        <option value={10000}>10 Seconds</option>
+                        <option value={30000}>30 Seconds</option>
+                        <option value={60000}>1 Minute</option>
+                        <option value={300000}>5 Minutes</option>
+                        <option value={600000}>10 Minutes</option>
+                    </select>
+                </div>
+                <div className="serial-box">
+                    <span className="label">OVERLOAD ALARM (WLL)</span>
+                    <div className="wll-input-group">
+                        <input type="number" value={wllThreshold || ''} placeholder="Off"
+                            onChange={(e) => setWllThreshold(parseFloat(e.target.value) || 0)}
+                            style={{ width: '80px' }} />
+                        <span>lbs</span>
+                    </div>
+                </div>
+                <div className="serial-box">
+                    <span className="label">TWO TESTS AT ONCE</span>
+                    <button
+                        onClick={handleToggleDual}
+                        className={`action-btn ${dualMode ? '' : 'secondary'}`}
+                        disabled={anyLogging}
+                        style={{ fontSize: '0.78rem', padding: '4px 12px', whiteSpace: 'nowrap' }}
+                        title={anyLogging ? 'Stop recording before changing test layout' : 'Record two independent load tests simultaneously'}
+                    >
+                        {dualMode ? '✓ Dual Test ON' : 'Enable Dual Test'}
+                    </button>
+                </div>
+                <div className="serial-box">
+                    <span className="label">COMPANION APP</span>
+                    {companionRunning ? (
+                        <button
+                            onClick={onOpenCompanion}
+                            className="action-btn secondary"
+                            style={{ fontSize: '0.78rem', padding: '4px 12px', whiteSpace: 'nowrap' }}
+                            title="Companion server is running — tap to view the phone connection link"
+                        >
+                            📱 Running{companionClients > 0 ? ` (${companionClients})` : ''} — Show Link
+                        </button>
+                    ) : (
+                        <button
+                            onClick={onStartCompanion}
+                            className="action-btn"
+                            style={{ fontSize: '0.78rem', padding: '4px 12px', whiteSpace: 'nowrap' }}
+                            title="Start the companion server so field crew can watch live data on their phones"
+                        >
+                            📱 Start Server
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            {/* Global controls shared by both tests */}
+            <div className="control-row" style={{ marginBottom: 12 }}>
+                <button onClick={handleWakeSensors} className="action-btn secondary" title="Sends an aggressive broadcast to wake all nearby sensors">
+                    Wake All Sensors
+                </button>
+                <div className="keep-awake-container ml-auto">
+                    <label className="awake-label">
+                        <input type="checkbox" checked={keepAwake} onChange={toggleKeepAwake} />
+                        KEEP TRANSMITTERS AWAKE
+                    </label>
+                </div>
+            </div>
+
+            <div style={{
+                display: 'grid',
+                gridTemplateColumns: dualMode ? 'repeat(auto-fit, minmax(420px, 1fr))' : '1fr',
+                gap: dualMode ? '16px' : 0
+            }}>
+                <TestPanel
+                    label={dualMode ? 'Test A' : null}
+                    status={status}
+                    devices={devices}
+                    allTags={tags}
+                    excludeTags={tagsB}
+                    selectedTags={selectedTags}
+                    setSelectedTags={setSelectedTags}
+                    cellCount={cellCount}
+                    setCellCount={setCellCount}
+                    isLogging={isLogging}
+                    loggedData={loggedData}
+                    markers={markers}
+                    setMarkers={setMarkers}
+                    onStart={() => startTest({
+                        label: dualMode ? 'Test A' : null,
+                        setLoggedData, setMarkers, setIsLogging,
+                        autosaveRef: autosaveRefA,
+                        otherIsLogging: dualMode && isLoggingB,
+                    })}
+                    onStop={() => stopTest({
+                        label: dualMode ? 'Test A' : null,
+                        loggedData, markers,
+                        setLoggedData, setMarkers, setIsLogging,
+                        autosaveRef: autosaveRefA,
+                        otherIsLogging: dualMode && isLoggingB,
+                    })}
+                    overloadTags={overloadTags}
+                    getSignalStatus={getSignalStatus}
+                    getSignalLabel={getSignalLabel}
+                    onZero={handleZero}
+                    onClearZeros={() => clearZerosFor(tagsA)}
+                    displayUnit={displayUnit}
+                    onUnitChange={onUnitChange}
+                    xUnit={xUnit}
+                    onXUnitChange={onXUnitChange}
+                    selectedJob={selectedJob}
+                    jobNumberLabel={jobNumberLabel}
+                    previewData={previewData}
+                />
+
+                {dualMode && (
+                    <TestPanel
+                        label="Test B"
+                        status={status}
+                        devices={devices}
+                        allTags={tags}
+                        excludeTags={tagsA}
+                        selectedTags={selectedTagsB}
+                        setSelectedTags={setSelectedTagsB}
+                        cellCount={cellCountB}
+                        setCellCount={setCellCountB}
+                        isLogging={isLoggingB}
+                        loggedData={loggedDataB}
+                        markers={markersB}
+                        setMarkers={setMarkersB}
+                        onStart={() => startTest({
+                            label: 'Test B',
+                            setLoggedData: setLoggedDataB, setMarkers: setMarkersB, setIsLogging: setIsLoggingB,
+                            autosaveRef: autosaveRefB,
+                            otherIsLogging: isLogging,
+                        })}
+                        onStop={() => stopTest({
+                            label: 'Test B',
+                            loggedData: loggedDataB, markers: markersB,
+                            setLoggedData: setLoggedDataB, setMarkers: setMarkersB, setIsLogging: setIsLoggingB,
+                            autosaveRef: autosaveRefB,
+                            otherIsLogging: isLogging,
+                        })}
+                        overloadTags={overloadTags}
+                        getSignalStatus={getSignalStatus}
+                        getSignalLabel={getSignalLabel}
+                        onZero={handleZero}
+                        onClearZeros={() => clearZerosFor(tagsB)}
+                        displayUnit={displayUnit}
+                        onUnitChange={onUnitChange}
+                        xUnit={xUnit}
+                        onXUnitChange={onXUnitChange}
+                        selectedJob={selectedJob}
+                        jobNumberLabel={jobNumberLabel}
+                        previewData={previewData}
+                    />
+                )}
+            </div>
+
+            {lastAutosave && anyLogging && (
+                <div className="autosave-indicator" style={{ marginTop: 10, justifyContent: 'center', display: 'flex', gap: 6 }}>
+                    <span className="check">&#10003;</span>
+                    Auto-saved {lastAutosave.toLocaleTimeString()}
+                </div>
+            )}
+
+            {showJobPrompt && (
+                <div className="modal-overlay">
+                    <div className="job-prompt-card">
+                        <h3>Save to Projects</h3>
+                        <p>Complete the recording{pendingPrompt?.label ? ` for ${pendingPrompt.label}` : ''} by assigning a Job Number.</p>
+                        <div className="form-group mt-4">
+                            <label>Job Number (Format: HWI-XX-XXX)</label>
+                            <input
+                                type="text"
+                                value={jobInput}
+                                onChange={(e) => { setJobInput(e.target.value); setError(''); }}
+                                placeholder="HWI-24-001"
+                                className={`large-input ${error ? 'error-border' : ''}`}
+                                autoFocus
+                            />
+                            {error && <div className="error-text">{error}</div>}
+                        </div>
+                        <div className="form-actions mt-4">
+                            <button onClick={handleSave} className="action-btn">Save Project</button>
+                            <button onClick={cancelSave} className="action-btn secondary ml-4">Discard</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

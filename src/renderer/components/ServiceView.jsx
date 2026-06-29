@@ -81,67 +81,104 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
     // --- Lifted Live Telemetry & Logging State ---
     const [devices, setDevices] = useState({}); // tag -> latest packet
+    const [logInterval, setLogInterval] = useState(0); // ms (shared sample rate)
+    const [keepAwake, setKeepAwake] = useState(false);
+    const [previewData, setPreviewData] = useState([]); // Rolling buffer for preview
+
+    // Dual-test mode: record two independent load tests at once. Test A is the
+    // original single-test path (unchanged when dualMode is off); Test B is a
+    // parallel recording session that saves as a second data set on the same job.
+    const [dualMode, setDualMode] = useState(false);
+
+    // Test A
     const [selectedTags, setSelectedTags] = useState(Array(10).fill(null));
     const [cellCount, setCellCount] = useState(1);
     const [isLogging, setIsLogging] = useState(false);
     const [loggedData, setLoggedData] = useState([]);
     const [markers, setMarkers] = useState([]); // test-phase markers for the active recording
-    const [logInterval, setLogInterval] = useState(0); // ms
-    const [keepAwake, setKeepAwake] = useState(false);
-    const [previewData, setPreviewData] = useState([]); // Rolling buffer for preview
+
+    // Test B (only active while dualMode is on)
+    const [selectedTagsB, setSelectedTagsB] = useState(Array(10).fill(null));
+    const [cellCountB, setCellCountB] = useState(1);
+    const [isLoggingB, setIsLoggingB] = useState(false);
+    const [loggedDataB, setLoggedDataB] = useState([]);
+    const [markersB, setMarkersB] = useState([]);
 
     // Refs for IPC listener access
     const [saveStatus, setSaveStatus] = useState('synced'); // 'synced' | 'saving' | 'error'
     const devicesRef = useRef({});
+    const logIntervalRef = useRef(logInterval);
+    const dualModeRef = useRef(dualMode);
     const selectedTagsRef = useRef(selectedTags);
     const cellCountRef = useRef(cellCount);
     const isLoggingRef = useRef(isLogging);
-    const logIntervalRef = useRef(logInterval);
-    const lastLoggedTimesRef = useRef({}); // tag -> time
+    const lastLoggedTimesRef = useRef({}); // tag -> time (Test A)
+    const selectedTagsBRef = useRef(selectedTagsB);
+    const cellCountBRef = useRef(cellCountB);
+    const isLoggingBRef = useRef(isLoggingB);
+    const lastLoggedTimesBRef = useRef({}); // tag -> time (Test B)
 
+    useEffect(() => { logIntervalRef.current = logInterval; }, [logInterval]);
+    useEffect(() => { dualModeRef.current = dualMode; }, [dualMode]);
     useEffect(() => { selectedTagsRef.current = selectedTags; }, [selectedTags]);
     useEffect(() => { cellCountRef.current = cellCount; }, [cellCount]);
     useEffect(() => {
         isLoggingRef.current = isLogging;
         if (!isLogging) lastLoggedTimesRef.current = {};
     }, [isLogging]);
-    useEffect(() => { logIntervalRef.current = logInterval; }, [logInterval]);
+    useEffect(() => { selectedTagsBRef.current = selectedTagsB; }, [selectedTagsB]);
+    useEffect(() => { cellCountBRef.current = cellCountB; }, [cellCountB]);
+    useEffect(() => {
+        isLoggingBRef.current = isLoggingB;
+        if (!isLoggingB) lastLoggedTimesBRef.current = {};
+    }, [isLoggingB]);
 
     // Central Live Data Listener
     useEffect(() => {
         if (getElectronAPI().onLiveData) {
+            // Append a packet to one test's logged buffer if that test is
+            // logging and owns the packet's tag. Shared by Test A and Test B.
+            const recordForTest = (packet, activeTags, isLoggingNow, lastTimesRef, setData) => {
+                if (!isLoggingNow || !activeTags.includes(packet.tag)) return;
+                const interval = logIntervalRef.current;
+                const lastLogged = lastTimesRef.current[packet.tag] || 0;
+                const shouldLog = interval === 0 || (packet.timestamp - lastLogged) >= interval;
+                if (!shouldLog) return;
+
+                setData(prev => {
+                    const firstTimestamp = prev.length > 0 ? prev[0].timestamp : packet.timestamp;
+                    let currentTotal = 0;
+                    activeTags.forEach(tag => {
+                        if (!tag) return;
+                        if (tag === packet.tag) currentTotal += packet.value;
+                        else if (devicesRef.current[tag]) currentTotal += devicesRef.current[tag].value;
+                    });
+                    return [...prev, {
+                        ...packet,
+                        "Total Load": currentTotal,
+                        "Tag": packet.tag,
+                        "Elapsed (ms)": packet.timestamp - firstTimestamp
+                    }];
+                });
+                lastTimesRef.current[packet.tag] = packet.timestamp;
+            };
+
             const removeListener = getElectronAPI().onLiveData((packet) => {
                 devicesRef.current = { ...devicesRef.current, [packet.tag]: packet };
                 setDevices({ ...devicesRef.current });
 
                 const activeTags = selectedTagsRef.current.slice(0, cellCountRef.current);
-                if (isLoggingRef.current && activeTags.includes(packet.tag)) {
-                    const interval = logIntervalRef.current;
-                    const lastLogged = lastLoggedTimesRef.current[packet.tag] || 0;
-                    const shouldLog = interval === 0 || (packet.timestamp - lastLogged) >= interval;
+                recordForTest(packet, activeTags, isLoggingRef.current, lastLoggedTimesRef, setLoggedData);
 
-                    if (shouldLog) {
-                        setLoggedData(prev => {
-                            const firstTimestamp = prev.length > 0 ? prev[0].timestamp : packet.timestamp;
-                            let currentTotal = 0;
-                            activeTags.forEach(tag => {
-                                if (!tag) return;
-                                if (tag === packet.tag) currentTotal += packet.value;
-                                else if (devicesRef.current[tag]) currentTotal += devicesRef.current[tag].value;
-                            });
+                const activeTagsB = dualModeRef.current
+                    ? selectedTagsBRef.current.slice(0, cellCountBRef.current)
+                    : [];
+                recordForTest(packet, activeTagsB, isLoggingBRef.current, lastLoggedTimesBRef, setLoggedDataB);
 
-                            return [...prev, {
-                                ...packet,
-                                "Total Load": currentTotal,
-                                "Tag": packet.tag,
-                                "Elapsed (ms)": packet.timestamp - firstTimestamp
-                            }];
-                        });
-                        lastLoggedTimesRef.current[packet.tag] = packet.timestamp;
-                    }
-                }
-
-                if (!isLoggingRef.current) {
+                // Auto-assign a newly seen tag to an empty Test A slot. Disabled in
+                // dual mode so incoming tags don't get claimed before the operator
+                // can split them between the two tests manually.
+                if (!isLoggingRef.current && !dualModeRef.current) {
                     const currentTags = [...selectedTagsRef.current];
                     if (!currentTags.includes(packet.tag)) {
                         const emptyIndex = currentTags.findIndex(t => t === null);
@@ -260,9 +297,12 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
     // Active Polling & Keep Awake Sync (Persistent across tabs)
     useEffect(() => {
-        const activeTags = selectedTags.slice(0, cellCount);
+        const activeTags = [
+            ...selectedTags.slice(0, cellCount),
+            ...(dualMode ? selectedTagsB.slice(0, cellCountB) : [])
+        ];
         if (deviceStatus === 'connected' && activeTags.some(t => t)) {
-            getElectronAPI().startPolling(activeTags);
+            getElectronAPI().startPolling(activeTags.filter(Boolean));
         } else {
             getElectronAPI().stopPolling();
         }
@@ -272,7 +312,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                 setKeepAwake(isActive);
             });
         }
-    }, [selectedTags, cellCount, deviceStatus]);
+    }, [selectedTags, cellCount, selectedTagsB, cellCountB, dualMode, deviceStatus]);
 
     // Sync session state to companion server (mobile PWA).
     // companionRunning is in the deps so the current state (tags/cells/logging)
@@ -283,11 +323,11 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         getElectronAPI().companionUpdateState({
             selectedTags,
             cellCount,
-            isLogging,
+            isLogging: isLogging || (dualMode && isLoggingB),
             activeJobName: selectedSharePointJob?.JobName || selectedSharePointJob?.QuoteNum
                 || (allJobs.find(j => j.id?.toString() === activeJobId?.toString())?.metadata?.jobNumber) || ''
         });
-    }, [selectedTags, cellCount, isLogging, companionRunning, selectedSharePointJob, activeJobId, allJobs]);
+    }, [selectedTags, cellCount, isLogging, isLoggingB, dualMode, companionRunning, selectedSharePointJob, activeJobId, allJobs]);
 
     useEffect(() => {
         const openPhases = [];
@@ -322,15 +362,17 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         return () => { cancelled = true; };
     }, [selectedSharePointJob, activeJobId, companionRunning]);
 
-    // Auto-advance: recording stopped with data → navigate to Review & Finalize
-    const prevLoggingRef = useRef(isLogging);
+    // Auto-advance: when all recording has stopped with data → Review & Finalize.
+    // In dual mode this waits until both Test A and Test B have stopped.
+    const anyLogging = isLogging || isLoggingB;
+    const prevLoggingRef = useRef(anyLogging);
     useEffect(() => {
         const wasLogging = prevLoggingRef.current;
-        prevLoggingRef.current = isLogging;
-        if (wasLogging && !isLogging && activeJob?.dataSets?.length > 0) {
+        prevLoggingRef.current = anyLogging;
+        if (wasLogging && !anyLogging && activeJob?.dataSets?.length > 0) {
             setActiveTab('report');
         }
-    }, [isLogging]);
+    }, [anyLogging]);
 
     const handleRecover = async () => {
         if (getElectronAPI().loadRecovery) {
@@ -751,10 +793,18 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                     </div>
                 ) : null;
             })()}
-            {!isCertPreview && isLogging && (
+            {!isCertPreview && (isLogging || (dualMode && isLoggingB)) && (
                 <div className="no-print" style={{ background: 'rgba(74,222,128,0.1)', borderBottom: '1px solid var(--green)', padding: '5px 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--green)' }}>
                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--green)', animation: 'pulse 1.5s infinite', display: 'inline-block' }}></span>
-                    Recording{loggedData.length > 0 ? ` — ${loggedData.length} samples` : ''}
+                    {dualMode ? (
+                        <>
+                            Recording
+                            {isLogging ? ` — Test A: ${loggedData.length} samples` : ''}
+                            {isLoggingB ? ` — Test B: ${loggedDataB.length} samples` : ''}
+                        </>
+                    ) : (
+                        <>Recording{loggedData.length > 0 ? ` — ${loggedData.length} samples` : ''}</>
+                    )}
                 </div>
             )}
             <main className="app-content">
@@ -840,6 +890,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 selectedJob={selectedSharePointJob}
                                 recoveryData={recoverySession}
                                 devices={devices}
+                                dualMode={dualMode}
+                                setDualMode={setDualMode}
                                 selectedTags={selectedTags}
                                 setSelectedTags={setSelectedTags}
                                 cellCount={cellCount}
@@ -850,6 +902,16 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 setLoggedData={setLoggedData}
                                 markers={markers}
                                 setMarkers={setMarkers}
+                                selectedTagsB={selectedTagsB}
+                                setSelectedTagsB={setSelectedTagsB}
+                                cellCountB={cellCountB}
+                                setCellCountB={setCellCountB}
+                                isLoggingB={isLoggingB}
+                                setIsLoggingB={setIsLoggingB}
+                                loggedDataB={loggedDataB}
+                                setLoggedDataB={setLoggedDataB}
+                                markersB={markersB}
+                                setMarkersB={setMarkersB}
                                 logInterval={logInterval}
                                 setLogInterval={setLogInterval}
                                 keepAwake={keepAwake}
