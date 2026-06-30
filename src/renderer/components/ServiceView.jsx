@@ -1086,12 +1086,14 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             </div>
 
                             {/* Connection Instructions */}
-                            {companionRunning && companionIPs.length > 0 && (
+                            {companionRunning && (
                                 <div style={{
                                     background: 'var(--bg-card)', borderRadius: '12px', padding: '1.5rem',
                                     border: '1px solid var(--border-color)', marginBottom: '1.5rem'
                                 }}>
                                     <h3 style={{ margin: '0 0 1rem 0' }}>📲 Connect a Phone</h3>
+                                    {companionIPs.length > 0 ? (
+                                      <>
                                     <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
                                         Make sure the phone is on the <strong>same WiFi network</strong> as this computer, then <strong>scan the QR code</strong> with the phone's camera (or tap Copy and open the link):
                                     </p>
@@ -1137,6 +1139,16 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                     }}>
                                         💡 <strong>Tip:</strong> On the phone, tap "Add to Home Screen" in the browser menu to install it as an app icon.
                                     </div>
+                                      </>
+                                    ) : (
+                                      <div style={{
+                                        marginTop: '0.5rem', padding: '14px', borderRadius: '8px',
+                                        background: 'rgba(240, 184, 0, 0.08)', border: '1px solid rgba(240, 184, 0, 0.2)',
+                                        color: 'var(--text-muted)', fontSize: '0.9rem', lineHeight: 1.5
+                                      }}>
+                                        ⏳ <strong>Waiting for a network address…</strong> The server is running, but this computer doesn't have a Wi-Fi/LAN (IPv4) address yet, so there's no link to share. Make sure it's connected to the <strong>same Wi-Fi</strong> as the phone — the QR code and link will appear here automatically once an address is available (this view refreshes every few seconds).
+                                      </div>
+                                    )}
                                 </div>
                             )}
 

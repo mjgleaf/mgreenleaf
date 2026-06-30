@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Legend, ResponsiveContainer } from 'recharts';
 import processChartData from '../utils/processChartData';
 import { getElectronAPI } from '../utils/electronAPI';
 import { SignaturePad } from './CustomerView';
@@ -35,6 +35,8 @@ function CertChart({ stats, yAxisLabel, xAxisLabel, isPrint }) {
                 <CartesianGrid strokeDasharray="3 3" stroke={isPrint ? '#eee' : 'rgba(33,51,77,0.5)'} />
                 <XAxis
                     dataKey="time"
+                    type="number"
+                    domain={[0, 'dataMax']}
                     label={{ value: xAxisLabel, position: 'insideBottom', offset: -5, fontSize, fontWeight: 'bold' }}
                     tick={{ fontSize }}
                     tickFormatter={v => v.toFixed(1)}
@@ -44,7 +46,6 @@ function CertChart({ stats, yAxisLabel, xAxisLabel, isPrint }) {
                     tick={{ fontSize }}
                     domain={[0, 'auto']}
                 />
-                <Tooltip />
                 {stats.chartData.datasets.length > 1 && (
                     <Legend wrapperStyle={{ fontSize: 8, fontWeight: 'bold' }} />
                 )}
@@ -55,6 +56,7 @@ function CertChart({ stats, yAxisLabel, xAxisLabel, isPrint }) {
                         dataKey={ds.label}
                         stroke={certPalette[i % certPalette.length]}
                         dot={false}
+                        activeDot={false}
                         strokeWidth={2}
                         isAnimationActive={false}
                     />
@@ -2321,7 +2323,16 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     const defPhotoCols = photoCount <= 2 ? photoCount : 2;
 
                     // --- Apply AI overrides or use defaults ---
-                    const chartHeights = lo?.chartHeights || allChartStats.map(() => defChartH);
+                    // Charts are kept at a UNIFORM height so multiple load-test graphs
+                    // render at the same size. We still honor the AI's overall space
+                    // budget (sum of its chartHeights) but distribute it evenly.
+                    const aiHeights = Array.isArray(lo?.chartHeights) && lo.chartHeights.length
+                        ? lo.chartHeights
+                        : null;
+                    const uniformChartH = aiHeights
+                        ? Math.round(aiHeights.reduce((a, b) => a + b, 0) / aiHeights.length)
+                        : defChartH;
+                    const chartHeights = allChartStats.map(() => uniformChartH);
                     const photoCols = lo?.photoCols ?? defPhotoCols;
                     const photoItemHeight = lo?.photoHeight ?? defPhotoItemH;
                     const pageBreaks = lo?.graphPageBreaks || formData.graphPageBreaks || {};

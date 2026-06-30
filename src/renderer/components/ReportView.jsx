@@ -175,6 +175,8 @@ function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitC
                                             <CartesianGrid strokeDasharray="3 3" stroke="rgba(33, 51, 77, 0.5)" />
                                             <XAxis
                                                 dataKey="time"
+                                                type="number"
+                                                domain={[0, 'dataMax']}
                                                 label={{ value: `Elapsed Time (${xUnit === 'hour' ? 'hr' : 'min'})`, position: 'insideBottom', offset: -5, fill: '#8b949e' }}
                                                 tick={{ fill: '#8b949e' }}
                                                 tickFormatter={v => v.toFixed(1)}
