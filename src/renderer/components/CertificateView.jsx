@@ -202,6 +202,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             certData: job?.metadata?.certData || null,
             certLayout: job?.metadata?.certLayout || 'crane-hook',
             testSchema: job?.metadata?.testSchema || null,
+            aiMessages: job?.metadata?.aiMessages || aiMessages || [],
         };
         onUpdateMetadata(jobId, { certificates: certs });
     };
@@ -210,11 +211,11 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (!onUpdateMetadata || !jobId) return;
         saveCurrentToSlot(activeCertIndex);
         const certs = [...(certificates.length > 0 ? certificates : [])];
-        while (certs.length <= activeCertIndex) certs.push({ name: `Certificate ${certs.length + 1}`, certData: job?.metadata?.certData, certLayout: job?.metadata?.certLayout, testSchema: job?.metadata?.testSchema });
+        while (certs.length <= activeCertIndex) certs.push({ name: `Certificate ${certs.length + 1}`, certData: job?.metadata?.certData, certLayout: job?.metadata?.certLayout, testSchema: job?.metadata?.testSchema, aiMessages: job?.metadata?.aiMessages || [] });
         const newIdx = certs.length;
-        certs.push({ name: `Certificate ${newIdx + 1}`, certData: null, certLayout: 'crane-hook', testSchema: null });
+        certs.push({ name: `Certificate ${newIdx + 1}`, certData: null, certLayout: 'crane-hook', testSchema: null, aiMessages: [] });
         const defaults = buildDefaultFormData();
-        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: newIdx, certData: defaults, certLayout: 'crane-hook', testSchema: null });
+        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: newIdx, certData: defaults, certLayout: 'crane-hook', testSchema: null, aiMessages: [] });
         setActiveCertIndex(newIdx);
         setFormData(defaults);
         setCertLayoutState('crane-hook');
@@ -227,19 +228,20 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         if (idx === activeCertIndex || !onUpdateMetadata || !jobId) return;
         saveCurrentToSlot(activeCertIndex);
         const certs = [...(certificates.length > 0 ? certificates : [])];
-        while (certs.length <= activeCertIndex) certs.push({ name: `Certificate ${certs.length + 1}`, certData: job?.metadata?.certData, certLayout: job?.metadata?.certLayout, testSchema: job?.metadata?.testSchema });
+        while (certs.length <= activeCertIndex) certs.push({ name: `Certificate ${certs.length + 1}`, certData: job?.metadata?.certData, certLayout: job?.metadata?.certLayout, testSchema: job?.metadata?.testSchema, aiMessages: job?.metadata?.aiMessages || [] });
         if (idx >= certs.length) return;
         const cert = certs[idx];
         const certData = cert.certData || buildDefaultFormData();
         const certLayout = cert.certLayout || 'crane-hook';
         const schema = cert.testSchema || null;
-        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: idx, certData, certLayout, testSchema: schema });
+        const chat = cert.aiMessages || [];
+        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: idx, certData, certLayout, testSchema: schema, aiMessages: chat });
         setActiveCertIndex(idx);
         setFormData(prev => ({ ...buildDefaultFormData(), ...certData }));
         setCertLayoutState(certLayout);
         setTestSchema(schema);
         setCustomerSignature(null);
-        setAiMessages([]);
+        setAiMessages(chat);
     };
 
     const renameCertificate = (idx, name) => {
@@ -257,7 +259,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         // another tab never loses the active certificate's in-progress edits.
         const certs = [...(certificates.length > 0 ? certificates : [{ name: 'Certificate 1' }])];
         while (certs.length <= activeCertIndex) certs.push({ name: `Certificate ${certs.length + 1}` });
-        certs[activeCertIndex] = { ...certs[activeCertIndex], certData: formData, certLayout, testSchema };
+        certs[activeCertIndex] = { ...certs[activeCertIndex], certData: formData, certLayout, testSchema, aiMessages };
         if (certs.length <= 1) return; // never delete the last certificate
         if (idx < 0 || idx >= certs.length) return;
 
@@ -280,14 +282,15 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         const targetData = t.certData || buildDefaultFormData();
         const targetLayout = t.certLayout || 'crane-hook';
         const targetSchema = t.testSchema || null;
+        const targetChat = t.aiMessages || [];
 
-        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: newActive, certData: targetData, certLayout: targetLayout, testSchema: targetSchema });
+        onUpdateMetadata(jobId, { certificates: certs, activeCertIndex: newActive, certData: targetData, certLayout: targetLayout, testSchema: targetSchema, aiMessages: targetChat });
         setActiveCertIndex(newActive);
         setFormData({ ...buildDefaultFormData(), ...targetData });
         setCertLayoutState(targetLayout);
         setTestSchema(targetSchema);
         setCustomerSignature(null);
-        setAiMessages([]);
+        setAiMessages(targetChat);
     };
 
 
@@ -438,7 +441,10 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
     const [aiDescription, setAiDescription] = useState('');
     const [aiLoading, setAiLoading] = useState(false);
     const [aiError, setAiError] = useState('');
-    const [aiMessages, setAiMessages] = useState([]);
+    // The AI conversation is persisted on the active certificate's metadata so it
+    // survives app restarts and can be continued later to make edits. Seed from
+    // saved metadata on mount; updateAiMessages() keeps state + metadata in sync.
+    const [aiMessages, setAiMessages] = useState(job?.metadata?.aiMessages || []);
     const aiChatEndRef = useRef(null);
     const [aiLayoutOverrides, setAiLayoutOverrides] = useState(null);
     const [aiLayoutLoading, setAiLayoutLoading] = useState(false);
@@ -465,6 +471,23 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         setTestSchema(schema);
         if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { testSchema: schema });
     };
+
+    // Update the AI conversation AND persist it to the active certificate's metadata,
+    // so it is written to disk by the central autosave engine and restored on reopen.
+    // Takes the full next array (not an updater) — persistence must run in the event
+    // handler, never inside a setState updater, to avoid updating the parent during render.
+    const updateAiMessages = (msgs) => {
+        setAiMessages(msgs);
+        if (onUpdateMetadata && jobId) onUpdateMetadata(jobId, { aiMessages: msgs });
+    };
+
+    // Restore the saved conversation when the active job changes (reopening the app,
+    // or switching jobs without a remount). Keyed on jobId only so adding a recording
+    // mid-session doesn't reset the chat. Certificate switching is handled separately.
+    useEffect(() => {
+        setAiMessages(job?.metadata?.aiMessages || []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [jobId]);
 
     // --- Drag-and-Drop Section Reordering ---
     const dragItem = useRef(null);
@@ -1265,7 +1288,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         const userMsg = aiDescription.trim();
         const isFollowUp = aiMessages.length > 0;
         const newMessages = [...aiMessages, { role: 'user', content: userMsg }];
-        setAiMessages(newMessages);
+        updateAiMessages(newMessages);
         setAiDescription('');
 
         try {
@@ -1275,7 +1298,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                 isFollowUp ? { certLayout, formData, testSchema } : null
             );
             if (result.ready === false) {
-                setAiMessages(prev => [...prev, { role: 'assistant', content: result.message }]);
+                updateAiMessages([...newMessages, { role: 'assistant', content: result.message }]);
             } else {
                 if (result.certLayout) setCertLayout(result.certLayout);
                 if (result.testSchema) setTestSchemaAndPersist(result.testSchema);
@@ -1297,11 +1320,11 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     }
                     return merged;
                 });
-                setAiMessages(prev => [...prev, { role: 'assistant', content: result.summary || 'Certificate generated.' }]);
+                updateAiMessages([...newMessages, { role: 'assistant', content: result.summary || 'Certificate generated.' }]);
             }
         } catch (err) {
             setAiError(err.message || 'Failed to generate template');
-            setAiMessages(prev => prev.slice(0, -1));
+            updateAiMessages(aiMessages); // revert the just-added user message on failure
         } finally {
             setAiLoading(false);
             setTimeout(() => aiChatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
@@ -2471,9 +2494,12 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     <button
                         onClick={() => setShowAiGenerator(true)}
                         className="action-btn"
+                        title={aiMessages.length > 0 ? 'Reopen the saved AI conversation to keep editing this certificate' : 'Generate this certificate with AI'}
                         style={{ fontSize: '0.85rem', padding: '8px 16px', whiteSpace: 'nowrap', background: '#1a3a6c' }}
                     >
-                        🤖 AI Generate
+                        {aiMessages.length > 0
+                            ? `🤖 Continue AI Chat (${aiMessages.filter(m => m.role === 'user').length})`
+                            : '🤖 AI Generate'}
                     </button>
                     <select
                         value={certLayout}
@@ -3641,7 +3667,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                                 {aiMessages.length > 0 && (
                                     <button
-                                        onClick={() => { setAiMessages([]); setAiError(''); }}
+                                        onClick={() => { updateAiMessages([]); setAiError(''); }}
                                         className="action-btn secondary small"
                                         disabled={aiLoading}
                                         style={{ fontSize: '0.75rem', padding: '3px 10px' }}
