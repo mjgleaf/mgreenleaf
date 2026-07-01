@@ -2309,8 +2309,12 @@ RULES:
     const messages = [{ role: "system", content: systemPrompt }];
 
     if (isFollowUp) {
-        // Inject the current form state so the AI knows what exists
-        let stateMsg = `CURRENT CERTIFICATE STATE:\ncertLayout: "${currentState.certLayout}"\nformData: ${JSON.stringify(currentState.formData, null, 0)}`;
+        // Inject the current form state so the AI knows what exists. Strip heavy
+        // runtime fields first — base64 photos and field-tech sheets can be tens of
+        // thousands of tokens (enough to blow past the model's per-minute limit) and
+        // are irrelevant to reasoning about the certificate structure.
+        const { photos, fieldTestSheet, fieldResults, ...leanFormData } = currentState.formData || {};
+        let stateMsg = `CURRENT CERTIFICATE STATE:\ncertLayout: "${currentState.certLayout}"\nformData: ${JSON.stringify(leanFormData, null, 0)}`;
         if (currentState.testSchema) {
             stateMsg += `\ntestSchema: ${JSON.stringify(currentState.testSchema, null, 0)}`;
         }
