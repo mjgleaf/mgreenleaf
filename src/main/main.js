@@ -807,6 +807,63 @@ function scanForDongle() {
 // Start scanning for T24 dongle (handle kept so it can be cleared on quit)
 const deviceScanTimer = setInterval(scanForDongle, DEVICE_SCAN_INTERVAL_MS);
 
+// --- Certificate PDF rendering (shared by Save-PDF and Email) ---------------
+// The repeating page header (logo + company band) and footer (disclaimer +
+// "Page X of Y") are drawn by Chromium's native header/footer templates so they
+// appear on EVERY page. The in-flow header band and disclaimer are hidden in
+// print CSS to avoid duplication; the page-1 title still renders in the body.
+const CERT_DISCLAIMER_TEXT = 'Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.';
+
+let _certLogoDataUrl = null;
+function getCertLogoDataUrl() {
+    if (_certLogoDataUrl !== null) return _certLogoDataUrl;
+    try {
+        // public/ ships in the packaged app (electron-builder files include public/**),
+        // so this resolves in both dev and production via app.getAppPath().
+        const logoPath = path.join(app.getAppPath(), 'public', 'logo.png');
+        _certLogoDataUrl = 'data:image/png;base64,' + fs.readFileSync(logoPath).toString('base64');
+    } catch (e) {
+        console.warn('[PDF] Header logo not found, printing without it:', e.message);
+        _certLogoDataUrl = '';
+    }
+    return _certLogoDataUrl;
+}
+
+function buildCertPdfOptions() {
+    const logo = getCertLogoDataUrl();
+    // Chromium print templates default to font-size 0 and need inline styles; system
+    // fonts only (custom fonts aren't available in the template context).
+    const headerTemplate = `
+        <div style="font-family: Arial, sans-serif; font-size: 8px; width: 100%; box-sizing: border-box; padding: 4px 12mm 0; margin: 0; color: #000; -webkit-print-color-adjust: exact;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #f5c518; padding-bottom: 3px;">
+                <div style="flex: 0 0 auto;">${logo ? `<img src="${logo}" style="height: 30px;" />` : ''}</div>
+                <div style="flex: 1; text-align: center; line-height: 1.25; padding: 0 10px;">
+                    <strong>Providing Proof-Load Testing Services</strong><br/>
+                    to the Maritime, Petroleum, &amp; Heavy Construction Industries - Worldwide
+                </div>
+                <div style="flex: 0 0 auto; text-align: right; line-height: 1.25;">
+                    <strong>8100 Lockheed Avenue</strong><br/>Houston, Texas 77061<br/>Tel: (713) 643-9990
+                </div>
+            </div>
+        </div>`;
+    const footerTemplate = `
+        <div style="font-family: Arial, sans-serif; font-size: 7px; width: 100%; box-sizing: border-box; padding: 0 12mm 3px; margin: 0; color: #444; -webkit-print-color-adjust: exact;">
+            <div style="text-align: center; font-style: italic; line-height: 1.2; border-top: 0.5px solid #ccc; padding-top: 3px;">${CERT_DISCLAIMER_TEXT}</div>
+            <div style="text-align: center; margin-top: 2px; color: #666;">Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>
+        </div>`;
+    return {
+        pageSize: 'A4',
+        printBackground: true,
+        landscape: false,
+        displayHeaderFooter: true,
+        headerTemplate,
+        footerTemplate,
+        // Inches. Top/bottom reserve space for the header/footer templates on every
+        // page; sides are 0 because the document body supplies its own 12mm padding.
+        margins: { top: 1.15, bottom: 0.85, left: 0, right: 0 }
+    };
+}
+
 async function handleSavePDF(event, title) {
     const { filePath } = await dialog.showSaveDialog({
         title: 'Save Certificate',
@@ -815,15 +872,7 @@ async function handleSavePDF(event, title) {
     });
 
     if (filePath) {
-        const options = {
-            marginsType: 0,
-            pageSize: 'A4',
-            printBackground: true,
-            printSelectionOnly: false,
-            landscape: false,
-            preferCSSPageSize: true,
-            scaleFactor: 100
-        };
+        const options = buildCertPdfOptions();
 
         try {
             const data = await mainWindow.webContents.printToPDF(options);
@@ -851,15 +900,7 @@ async function handleEmailCertificate(event, opts) {
     }
 
     try {
-        const pdfData = await mainWindow.webContents.printToPDF({
-            marginsType: 0,
-            pageSize: 'A4',
-            printBackground: true,
-            printSelectionOnly: false,
-            landscape: false,
-            preferCSSPageSize: true,
-            scaleFactor: 100
-        });
+        const pdfData = await mainWindow.webContents.printToPDF(buildCertPdfOptions());
 
         const safeName = (fileName || 'Certificate').replace(/[^a-zA-Z0-9_\- ]+/g, '_').trim() || 'Certificate';
         const toRecipients = to.split(/[;,]+/).map(s => s.trim()).filter(Boolean)
@@ -3413,11 +3454,7 @@ app.whenReady().then(() => {
 
             // Save PDF certificate if requested
             if (certPdfTitle && mainWindow) {
-                const pdfData = await mainWindow.webContents.printToPDF({
-                    printBackground: true,
-                    landscape: false,
-                    pageSize: 'Letter'
-                });
+                const pdfData = await mainWindow.webContents.printToPDF(buildCertPdfOptions());
                 const pdfPath = path.join(exportDir, `${certPdfTitle}.pdf`);
                 fs.writeFileSync(pdfPath, pdfData);
                 files.push(pdfPath);

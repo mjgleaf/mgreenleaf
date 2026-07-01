@@ -656,6 +656,10 @@ body {
   font-family: Arial, sans-serif;
 }
 
+.header-info {
+  text-align: center;
+}
+
 .contact-info {
   text-align: right;
 }
@@ -729,6 +733,7 @@ body {
   border-collapse: collapse;
   border: 1.5px solid #000;
   margin-bottom: 4px;
+  width: 100%;
 }
 
 .cert-table th,
@@ -737,6 +742,15 @@ body {
   padding: 4px;
   font-size: 0.7rem;
   text-align: center;
+  overflow-wrap: break-word;
+}
+
+/* Keep every cell in a row aligned to the top so the row number and the
+   measured values line up with the first line of the (possibly multi-line)
+   description, instead of floating in the vertical middle. !important is
+   needed to override the per-cell inline vertical-align styles. */
+.cert-table td {
+  vertical-align: top !important;
 }
 
 .cert-table th {
@@ -858,7 +872,10 @@ body {
 @media print {
   @page {
     size: A4 portrait;
-    margin: 0;
+    /* Margins are supplied by the Electron printToPDF options so the native
+       repeating header/footer templates have reserved space on every page.
+       Do NOT set margin:0 here — it overrides those and the body collides
+       with the header. */
   }
 
   .no-print,
@@ -886,25 +903,36 @@ body {
     border: none !important;
     box-shadow: none !important;
     margin: 0 !important;
-    padding: 10mm 12mm !important;
+    /* Top/bottom space for the repeating header/footer is reserved by the PDF
+       page margins; keep only a small top gap. 12mm sides override the on-screen
+       inline 44px left padding so the body lines up with the header/footer bands. */
+    padding: 2mm 12mm !important;
     width: 210mm !important;
     max-width: 100% !important;
     height: auto !important;
     overflow: visible !important;
   }
 
+  /* The logo/company band and the disclaimer repeat on every page via Chromium's
+     native header/footer templates, so hide the in-flow copies when printing.
+     The page-1 title (.cert-title) stays in the document body. */
+  .cert-header,
+  .cert-inflow-disclaimer {
+    display: none !important;
+  }
+
   .cert-main-page {
-    min-height: 270mm !important;
-    break-after: page;
+    min-height: 235mm !important;
+    /* No break-after here: the graphs/photos page (.cert-page-2) already carries
+       its own break-before. Having both emitted a trailing blank sheet. */
   }
 
   .cert-page-2 {
-    min-height: 275mm !important;
+    min-height: 210mm !important;
     display: flex !important;
     flex-direction: column !important;
   }
 
-  .cert-header,
   .cert-grid-main,
   .cert-table,
   .cert-chart-section,

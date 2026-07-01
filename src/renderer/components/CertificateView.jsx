@@ -28,22 +28,26 @@ const certPalette = ['#1a3a6c', '#3fb950', '#2188ff', '#f85149', '#dbab09', '#89
 
 function CertChart({ stats, yAxisLabel, xAxisLabel, isPrint }) {
     const rechartsData = toRechartsData(stats.chartData);
-    const fontSize = isPrint ? 7 : 9;
+    // Larger, darker axis text so it stays legible on the printed page.
+    const fontSize = isPrint ? 9 : 11;
+    const axisColor = '#111';
     return (
         <ResponsiveContainer width="100%" height="100%" minWidth={0}>
             <LineChart data={rechartsData}>
-                <CartesianGrid strokeDasharray="3 3" stroke={isPrint ? '#eee' : 'rgba(33,51,77,0.5)'} />
+                <CartesianGrid strokeDasharray="3 3" stroke={isPrint ? '#cfcfcf' : 'rgba(33,51,77,0.5)'} />
                 <XAxis
                     dataKey="time"
                     type="number"
                     domain={[0, 'dataMax']}
-                    label={{ value: xAxisLabel, position: 'insideBottom', offset: -5, fontSize, fontWeight: 'bold' }}
-                    tick={{ fontSize }}
+                    stroke="#555"
+                    label={{ value: xAxisLabel, position: 'insideBottom', offset: -5, fontSize: fontSize + 1, fontWeight: 'bold', fill: axisColor }}
+                    tick={{ fontSize, fill: axisColor }}
                     tickFormatter={v => v.toFixed(1)}
                 />
                 <YAxis
-                    label={{ value: yAxisLabel, angle: -90, position: 'insideLeft', fontSize, fontWeight: 'bold' }}
-                    tick={{ fontSize }}
+                    stroke="#555"
+                    label={{ value: yAxisLabel, angle: -90, position: 'insideLeft', fontSize: fontSize + 1, fontWeight: 'bold', fill: axisColor }}
+                    tick={{ fontSize, fill: axisColor }}
                     domain={[0, 'auto']}
                 />
                 {stats.chartData.datasets.length > 1 && (
@@ -2289,7 +2293,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         const otherSections = sections.filter(id => !isMain(id));
 
                         const disclaimerEl = (
-                            <div style={{ marginTop: '4px', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
+                            <div className="cert-inflow-disclaimer" style={{ marginTop: '4px', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
                                 Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
                             </div>
                         );
@@ -2331,15 +2335,20 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     const lo = aiLayoutOverrides; // AI layout overrides (if any)
 
                     // --- Compute default layout ---
-                    const USABLE_PX = 930;
+                    // Page-2 usable height in px. Lowered from the old full-page value
+                    // because the repeating PDF header/footer now reserve top/bottom margin.
+                    const USABLE_PX = 800;
                     const CHART_OVERHEAD = 22;
                     const PHOTO_OVERHEAD = 28;
                     const totalOverhead = (hasGraphs ? chartCount * CHART_OVERHEAD : 0) + (hasPhotos ? PHOTO_OVERHEAD : 0);
                     const contentPx = USABLE_PX - totalOverhead;
-                    const defPhotoWeight = !hasPhotos ? 0 : photoCount === 1 ? 0.7 : photoCount === 2 ? 0.9 : 1.1;
+                    // Bias the page-2 split toward photos: give photos a larger share of
+                    // the space and cap graph height lower, so graphs are more compact and
+                    // photos render noticeably bigger.
+                    const defPhotoWeight = !hasPhotos ? 0 : photoCount === 1 ? 1.1 : photoCount === 2 ? 1.5 : 1.9;
                     const defUnits = chartCount + defPhotoWeight;
                     const defUnitPx = defUnits > 0 ? contentPx / defUnits : contentPx;
-                    const defChartH = hasGraphs ? Math.max(80, Math.min(400, Math.floor(defUnitPx))) : 0;
+                    const defChartH = hasGraphs ? Math.max(70, Math.min(260, Math.floor(defUnitPx))) : 0;
                     const defPhotoRows = photoCount <= 2 ? 1 : 2;
                     const defPhotoTotalPx = hasPhotos ? Math.max(100, Math.floor(defUnitPx * defPhotoWeight)) : 0;
                     const defPhotoItemH = hasPhotos ? Math.floor((defPhotoTotalPx - (defPhotoRows > 1 ? 6 : 0)) / defPhotoRows) : 0;
@@ -2424,8 +2433,9 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 )}
                             </div>
 
-                            {/* Disclaimer pinned to bottom of page 2 */}
-                            <div style={{ marginTop: 'auto', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
+                            {/* Disclaimer pinned to bottom of page 2 (screen preview only;
+                                the print copy comes from the repeating PDF footer). */}
+                            <div className="cert-inflow-disclaimer" style={{ marginTop: 'auto', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
                                 Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
                             </div>
                         </div>
