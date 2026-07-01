@@ -913,11 +913,11 @@ body {
     overflow: visible !important;
   }
 
-  /* The logo/company band and the disclaimer repeat on every page via Chromium's
-     native header/footer templates, so hide the in-flow copies when printing.
-     The page-1 title (.cert-title) stays in the document body. */
-  .cert-header,
-  .cert-inflow-disclaimer {
+  /* The logo/company band repeats on every page via Chromium's native header
+     template, so hide the in-flow / preview-only band when printing. The page-1
+     title (.cert-title) stays in the document body. Preview-only footer/header
+     bands carry .no-print and are hidden by the rule above. */
+  .cert-header {
     display: none !important;
   }
 

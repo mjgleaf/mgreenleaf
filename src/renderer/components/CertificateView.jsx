@@ -1508,6 +1508,41 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
         }
     };
 
+    // The printed PDF draws the header, disclaimer, and "Page X of Y" on every page
+    // via Chromium's native header/footer templates, which don't appear in the live
+    // preview. These .no-print bands mirror them on-screen so the preview reflects the
+    // PDF; they are hidden in print to avoid duplicating the native templates.
+    const CERT_DISCLAIMER_TEXT = 'Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.';
+
+    const renderPreviewHeaderBand = () => (
+        <div className="cert-header no-print">
+            <div className="logo-group">
+                <img src={logo} alt="Hydro-Wates Logo" className="cert-logo" style={{ height: '42px', objectFit: 'contain', marginBottom: '2px' }} />
+            </div>
+            <div className="header-info">
+                <strong>Providing Proof-Load Testing Services</strong><br />
+                to the Maritime, Petroleum, &amp; Heavy<br />
+                Construction Industries - Worldwide
+            </div>
+            <div className="contact-info">
+                <strong>8100 Lockheed Avenue</strong><br />
+                Houston, Texas 77061<br />
+                Tel: (713) 643-9990
+            </div>
+        </div>
+    );
+
+    const renderPreviewFooterBand = (pageNum, pageCount) => (
+        <div className="no-print" style={{ marginTop: '6px' }}>
+            <div style={{ fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #ccc', paddingTop: '6px' }}>
+                {CERT_DISCLAIMER_TEXT}
+            </div>
+            <div style={{ fontSize: '0.62rem', color: '#666', textAlign: 'center', marginTop: '3px', letterSpacing: '0.3px' }}>
+                Page {pageNum} of {pageCount}
+            </div>
+        </div>
+    );
+
     if (isPreview) {
         return (
             <div className="preview-mode">
@@ -2292,12 +2327,6 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         const mainSections = sections.filter(isMain);
                         const otherSections = sections.filter(id => !isMain(id));
 
-                        const disclaimerEl = (
-                            <div className="cert-inflow-disclaimer" style={{ marginTop: '4px', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
-                                Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
-                            </div>
-                        );
-
                         const remainingSections = sections.filter(id => ['graphs', 'photos'].includes(id));
                         const hasPage2 = remainingSections.some(id => {
                             if (id === 'graphs') return allChartStats.length > 0;
@@ -2309,7 +2338,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                             <>
                                 <div className="cert-main-page">
                                     {mainSections.map(id => renderSectionContent(id))}
-                                    {!hasPage2 && disclaimerEl}
+                                    {renderPreviewFooterBand(1, hasPage2 ? 2 : 1)}
                                 </div>
                             </>
                         );
@@ -2372,6 +2401,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
 
                     return (
                         <div className="certificate-paper cert-page-2" style={{ paddingLeft: '44px', pageBreakBefore: 'always', breakBefore: 'page', display: 'flex', flexDirection: 'column', minHeight: '275mm' }}>
+                            {renderPreviewHeaderBand()}
                             <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                                 {/* Graphs */}
                                 {hasGraphs && allChartStats.map((stats, idx) => {
@@ -2433,10 +2463,10 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                 )}
                             </div>
 
-                            {/* Disclaimer pinned to bottom of page 2 (screen preview only;
-                                the print copy comes from the repeating PDF footer). */}
-                            <div className="cert-inflow-disclaimer" style={{ marginTop: 'auto', fontSize: '0.68rem', color: '#444', fontStyle: 'italic', textAlign: 'center', lineHeight: '1.2', borderTop: '0.5px solid #eee', paddingTop: '6px' }}>
-                                Scofield Group, LLC is not a Class Certified Surveyor nor OSHA Part 1919 Accredited Agency and makes no claim of equipment structural conformance as a result of load testing services performed.
+                            {/* Screen-only footer (disclaimer + page number); the printed
+                                copy comes from the repeating native PDF footer. */}
+                            <div style={{ marginTop: 'auto' }}>
+                                {renderPreviewFooterBand(2, 2)}
                             </div>
                         </div>
                     );
