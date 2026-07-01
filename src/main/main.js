@@ -402,10 +402,7 @@ class T24Reader {
         if (fs.existsSync(this.logFilePath)) {
             try { fs.unlinkSync(this.logFilePath); } catch (e) { }
         }
-        if (!this.powerSaveId || !powerSaveBlocker.isStarted(this.powerSaveId)) {
-            this.powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
-            console.log(`[T24] Power save blocker started: ${this.powerSaveId}`);
-        }
+        this.updatePowerSaveBlocker();
 
         // Auto-enable keep-awake during logging
         this.wasKeepAwakeBeforeLog = !!this.keepAwakeTimer;
@@ -430,14 +427,31 @@ class T24Reader {
             this.stopKeepAwake();
             console.log('[T24] Auto-disabled keep-awake after logging session.');
         }
-        if (this.powerSaveId !== null) {
+        // Release the PC-sleep blocker only if Keep Awake isn't still holding it.
+        this.updatePowerSaveBlocker();
+        console.log('Safety Log stopped.');
+    }
+
+    // Keep the Windows PC awake whenever the sensors are being kept awake OR a
+    // recording is in progress. Both the "Keep Awake" checkbox and logging route
+    // through here, so the two never fight over the single powerSaveBlocker handle:
+    // the blocker stays on as long as at least one of them still wants it, and is
+    // released only once neither does. Call this after any change to keepAwakeTimer
+    // or isLogging.
+    updatePowerSaveBlocker() {
+        const shouldBlock = this.keepAwakeTimer !== null || this.isLogging;
+        if (shouldBlock) {
+            if (this.powerSaveId === null || !powerSaveBlocker.isStarted(this.powerSaveId)) {
+                this.powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
+                console.log(`[T24] Power save blocker started: ${this.powerSaveId}`);
+            }
+        } else if (this.powerSaveId !== null) {
             if (powerSaveBlocker.isStarted(this.powerSaveId)) {
                 powerSaveBlocker.stop(this.powerSaveId);
                 console.log(`[T24] Power save blocker stopped: ${this.powerSaveId}`);
             }
             this.powerSaveId = null;
         }
-        console.log('Safety Log stopped.');
     }
 
     // LOG100-style watchdog: timer-based logging + aggressive reconnection
@@ -3023,6 +3037,10 @@ app.whenReady().then(() => {
         } else {
             t24Reader.stopKeepAwake();
         }
+        // Also keep the Windows PC awake while Keep Awake is on — not just during a
+        // recording. Otherwise the OS can sleep after its idle timeout, halting the
+        // stay-awake pulses and letting the T24 transmitter (and the handheld) drop.
+        t24Reader.updatePowerSaveBlocker();
         return { success: true };
     });
 
