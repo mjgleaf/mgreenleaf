@@ -659,6 +659,9 @@ class T24Reader {
             const packet = {
                 tag: tagHex,
                 value: value,
+                // How much this reading is being offset by an active Zero (tare), so the
+                // UI can show it. 0 = not zeroed. The value above is already net of this.
+                tareOffset: this.tares.get(tagHex) || 0,
                 timestamp: Date.now()
             };
 

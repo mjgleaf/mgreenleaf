@@ -274,6 +274,12 @@ function TestPanel({
                                 </div>
                                 <div className="slot-unit">Lbs</div>
 
+                                {packet && Math.abs(packet.tareOffset || 0) >= 0.5 && (
+                                    <div className="zeroed-indicator" title="This cell has an active Zero (tare). The reading above has this amount subtracted, so it will read low vs. an un-zeroed handheld. Use 'Clear Zeros' to remove it.">
+                                        ⊘ ZEROED {packet.tareOffset > 0 ? '−' : '+'}{Math.abs(packet.tareOffset).toLocaleString(undefined, { maximumFractionDigits: 0 })} lbs
+                                    </div>
+                                )}
+
                                 {peak !== null && peak !== undefined && (
                                     <div className="peak-hold">
                                         <span className="peak-label">Peak:</span>

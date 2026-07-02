@@ -856,6 +856,23 @@ body {
 /* CERTIFICATE LAYOUT FIXES                                                   */
 /* -------------------------------------------------------------------------- */
 
+/* Badge shown on a live load-cell card whenever an active Zero (tare) is
+   subtracting from the reading, so a stray "Zero" press can't silently offset
+   recorded loads (which then read low vs. an un-zeroed handheld). */
+.zeroed-indicator {
+  margin-top: 5px;
+  display: inline-block;
+  background: #b45309;
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .cert-main-page {
   display: flex;
   flex-direction: column;

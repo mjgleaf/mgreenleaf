@@ -497,19 +497,6 @@ function CustomerView({ onGoHome }) {
 
     const tags = Object.keys(devices);
 
-    // Feature #7: Auto-zero on recording start
-    const zeroAllAndStart = () => {
-        const activeTags = selectedTags.slice(0, cellCount).filter(t => t);
-        if (activeTags.length === 0) {
-            setSavedMessage('Please assign at least one load cell before recording.');
-            setTimeout(() => setSavedMessage(''), 4000);
-            return;
-        }
-        activeTags.forEach(tag => getElectronAPI().tare(tag));
-        // Small delay to let zero take effect
-        setTimeout(() => startLogging(), 200);
-    };
-
     const startLogging = () => {
         // Data validation: need at least one cell assigned
         const activeTags = selectedTags.slice(0, cellCount).filter(t => t);
@@ -1122,6 +1109,12 @@ function CustomerView({ onGoHome }) {
                                         {(packet ? packet.value : 0).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                                     </div>
                                     <div className="slot-unit">Lbs</div>
+
+                                    {packet && Math.abs(packet.tareOffset || 0) >= 0.5 && (
+                                        <div className="zeroed-indicator" title="This cell has an active Zero (tare). The reading above has this amount subtracted, so it will read low vs. an un-zeroed handheld. Use 'Clear Zeros' to remove it.">
+                                            ⊘ ZEROED {packet.tareOffset > 0 ? '−' : '+'}{Math.abs(packet.tareOffset).toLocaleString(undefined, { maximumFractionDigits: 0 })} lbs
+                                        </div>
+                                    )}
 
                                     {/* Feature #8: Peak hold */}
                                     {peak !== null && peak !== undefined && (
