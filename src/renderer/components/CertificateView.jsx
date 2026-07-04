@@ -1200,7 +1200,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
             const compressed = await compressImage(base64);
 
             setFormData(prev => {
-                const newPhotos = [...(prev.photos || []), compressed].slice(0, 4);
+                const newPhotos = [...(prev.photos || []), compressed].slice(0, 10);
                 const newFormData = { ...prev, photos: newPhotos };
                 if (onUpdateMetadata) {
                     onUpdateMetadata(jobId, { certData: newFormData });
@@ -2121,15 +2121,15 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                             <table className="cert-table">
                                                 <thead>
                                                     <tr>
-                                                        <th style={{ width: '40px' }}>Item</th>
+                                                        <th style={{ width: '34px' }}>Item</th>
                                                         <th>Item Description</th>
-                                                        <th style={{ width: '80px' }}>Local Time</th>
-                                                        <th style={{ width: '80px' }}>Test Dur.</th>
+                                                        <th style={{ width: '62px' }}>Local Time</th>
+                                                        <th style={{ width: '62px' }}>Test Dur.</th>
                                                         {(formData.hooks || []).map((hook, hIdx) => (
-                                                            <th key={hIdx} style={{ width: '95px', fontSize: '0.65rem' }}>{hook.name || `Hook ${hIdx + 1}`}</th>
+                                                            <th key={hIdx} style={{ width: '80px', fontSize: '0.65rem' }}>{hook.name || `Hook ${hIdx + 1}`}</th>
                                                         ))}
-                                                        <th style={{ width: '95px', fontSize: '0.65rem' }}>Total</th>
-                                                        <th style={{ width: '60px' }}>Accept</th>
+                                                        <th style={{ width: '85px', fontSize: '0.65rem' }}>Total</th>
+                                                        <th style={{ width: '48px' }}>Accept</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
@@ -2147,26 +2147,26 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                         .slice(0, parseInt(formData.numTests))
                                                         .map((test, index) => (
                                                             <tr key={index}>
-                                                                <td style={{ verticalAlign: 'top', paddingTop: '5px' }}>{index + 1}</td>
-                                                                <td className="text-left" style={{ paddingTop: '5px', paddingBottom: '5px' }}>
-                                                                    <div className="font-bold" style={{ fontSize: '0.95rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '3px' }}>
+                                                                <td style={{ verticalAlign: 'top', paddingTop: '3px' }}>{index + 1}</td>
+                                                                <td className="text-left" style={{ paddingTop: '3px', paddingBottom: '3px' }}>
+                                                                    <div className="font-bold" style={{ fontSize: '0.8rem', color: '#1a3a6c', borderBottom: '1px solid #1a3a6c', paddingBottom: '1px', marginBottom: '2px', lineHeight: '1.2' }}>
                                                                         {test.itemDescription || formData.equipmentTested}
                                                                     </div>
-                                                                    <div style={{ fontSize: '0.75rem', marginTop: '1px' }}>
+                                                                    <div style={{ fontSize: '0.68rem', marginTop: '1px' }}>
                                                                         <strong>Type:</strong> {test.loadType} | <strong>TEST LOAD:</strong> {test.wllPercentage || '100%'} WLL
                                                                     </div>
                                                                 </td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '5px' }}>{test.localTime}</td>
-                                                                <td style={{ verticalAlign: 'middle', paddingTop: '5px' }}>{test.testDuration}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '3px', fontSize: '0.75rem' }}>{test.localTime}</td>
+                                                                <td style={{ verticalAlign: 'middle', paddingTop: '3px', fontSize: '0.75rem' }}>{test.testDuration}</td>
                                                                 {(formData.hooks || []).map((hook, hIdx) => {
                                                                     const force = test.hookData && test.hookData[hIdx]?.measuredForce;
                                                                     return (
-                                                                        <td key={hIdx} className="force-val" style={{ fontSize: '0.85rem', verticalAlign: 'middle', paddingTop: '5px' }}>
+                                                                        <td key={hIdx} className="force-val" style={{ fontSize: '0.8rem', verticalAlign: 'middle', paddingTop: '3px' }}>
                                                                             {force && String(force).trim() ? `${force} lbs` : '--'}
                                                                         </td>
                                                                     );
                                                                 })}
-                                                                <td className="force-val" style={{ fontSize: '0.85rem', fontWeight: 700, verticalAlign: 'middle', paddingTop: '5px' }}>
+                                                                <td className="force-val" style={{ fontSize: '0.8rem', fontWeight: 700, verticalAlign: 'middle', paddingTop: '3px' }}>
                                                                     {(() => {
                                                                         const total = (formData.hooks || []).reduce((sum, _, hIdx) => {
                                                                             const raw = test.hookData && test.hookData[hIdx]?.measuredForce;
@@ -2176,7 +2176,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                         return total > 0 ? `${total.toLocaleString()} lbs` : '--';
                                                                     })()}
                                                                 </td>
-                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '5px' }}>{test.accept}</td>
+                                                                <td className="accept-val" style={{ color: test.accept === 'YES' ? '#006600' : '#cc0000', verticalAlign: 'middle', paddingTop: '3px' }}>{test.accept}</td>
                                                             </tr>
                                                         ))}
                                                 </tbody>
@@ -2230,7 +2230,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     const GC_PHOTO_OH = 28;
                                     const gcTotalOH = gcCount * GC_CHART_OH + (gcHasPhotos ? GC_PHOTO_OH : 0);
                                     const gcContentPx = GC_USABLE - gcTotalOH;
-                                    const gcPhotoWeight = !gcHasPhotos ? 0 : gcPhotos.length === 1 ? 0.7 : gcPhotos.length === 2 ? 0.9 : 1.1;
+                                    const gcPhotoWeight = !gcHasPhotos ? 0 : gcPhotos.length === 1 ? 0.7 : gcPhotos.length === 2 ? 0.9 : gcPhotos.length <= 4 ? 1.1 : gcPhotos.length <= 6 ? 1.4 : 1.7;
                                     const gcUnits = gcCount + gcPhotoWeight;
                                     const gcUnitPx = gcUnits > 0 ? gcContentPx / gcUnits : gcContentPx;
                                     const gcChartH = Math.max(80, Math.min(400, Math.floor(gcUnitPx)));
@@ -2272,13 +2272,13 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     const PP_PHOTO_OH = 28;
                                     const ppTotalOH = (ppChartCount > 0 ? ppChartCount * PP_CHART_OH : 0) + PP_PHOTO_OH;
                                     const ppContentPx = PP_USABLE - ppTotalOH;
-                                    const ppPhotoWeight = ppCount === 1 ? 0.7 : ppCount === 2 ? 0.9 : 1.1;
+                                    const ppPhotoWeight = ppCount === 1 ? 0.7 : ppCount === 2 ? 0.9 : ppCount <= 4 ? 1.1 : ppCount <= 6 ? 1.4 : 1.7;
                                     const ppUnits = ppChartCount + ppPhotoWeight;
                                     const ppUnitPx = ppUnits > 0 ? ppContentPx / ppUnits : ppContentPx;
                                     const ppTotalPx = Math.max(100, Math.floor(ppUnitPx * ppPhotoWeight));
-                                    const ppRows = ppCount <= 2 ? 1 : 2;
-                                    const ppItemH = Math.floor((ppTotalPx - (ppRows > 1 ? 6 : 0)) / ppRows);
-                                    const ppCols = ppCount <= 2 ? ppCount : 2;
+                                    const ppCols = ppCount <= 2 ? ppCount : ppCount <= 4 ? 2 : 3;
+                                    const ppRows = Math.ceil(ppCount / ppCols);
+                                    const ppItemH = Math.max(70, Math.floor((ppTotalPx - (ppRows - 1) * 6) / ppRows));
                                     content = (
                                         <div className="cert-photos-section" style={{ marginTop: '8px', padding: '4px 4px 6px' }}>
                                             <div className="cert-photos-header" style={{ fontSize: '0.65rem', marginBottom: '4px', paddingBottom: '2px' }}>SITE PHOTOS</div>
@@ -2374,14 +2374,14 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     // Bias the page-2 split toward photos: give photos a larger share of
                     // the space and cap graph height lower, so graphs are more compact and
                     // photos render noticeably bigger.
-                    const defPhotoWeight = !hasPhotos ? 0 : photoCount === 1 ? 1.1 : photoCount === 2 ? 1.5 : 1.9;
+                    const defPhotoWeight = !hasPhotos ? 0 : photoCount === 1 ? 1.1 : photoCount === 2 ? 1.5 : photoCount <= 4 ? 1.9 : photoCount <= 6 ? 2.4 : 2.8;
                     const defUnits = chartCount + defPhotoWeight;
                     const defUnitPx = defUnits > 0 ? contentPx / defUnits : contentPx;
                     const defChartH = hasGraphs ? Math.max(70, Math.min(260, Math.floor(defUnitPx))) : 0;
-                    const defPhotoRows = photoCount <= 2 ? 1 : 2;
+                    const defPhotoCols = photoCount <= 2 ? photoCount : photoCount <= 4 ? 2 : 3;
+                    const defPhotoRows = hasPhotos ? Math.ceil(photoCount / defPhotoCols) : 0;
                     const defPhotoTotalPx = hasPhotos ? Math.max(100, Math.floor(defUnitPx * defPhotoWeight)) : 0;
-                    const defPhotoItemH = hasPhotos ? Math.floor((defPhotoTotalPx - (defPhotoRows > 1 ? 6 : 0)) / defPhotoRows) : 0;
-                    const defPhotoCols = photoCount <= 2 ? photoCount : 2;
+                    const defPhotoItemH = hasPhotos ? Math.max(70, Math.floor((defPhotoTotalPx - (defPhotoRows - 1) * 6) / defPhotoRows)) : 0;
 
                     // --- Apply AI overrides or use defaults ---
                     // Charts are kept at a UNIFORM height so multiple load-test graphs
@@ -2396,6 +2396,44 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     const chartHeights = allChartStats.map(() => uniformChartH);
                     const photoCols = lo?.photoCols ?? defPhotoCols;
                     const photoItemHeight = lo?.photoHeight ?? defPhotoItemH;
+                    // Photos-only page 2: build fixed-height rows that exactly fill the
+                    // printed page. Heights must be explicit pixels — fr/flex sizing has
+                    // no definite container height in print and breaks across pages.
+                    const photosFillPage = hasPhotos && !hasGraphs;
+                    const PHOTO_GAP = 8;
+                    const PHOTO_CONTENT_W = 760;
+                    const photoBudget = USABLE_PX - PHOTO_OVERHEAD;
+                    const pickRowCount = (count) => {
+                        if (count <= 1) return 1;
+                        // Score each row count by how large photos render, assuming
+                        // typical 3:4 portrait site photos, discounted by empty cell space.
+                        let best = 1, bestScore = 0;
+                        for (let r = 1; r <= Math.min(count, 5); r++) {
+                            const perRow = Math.ceil(count / r);
+                            const cellW = (PHOTO_CONTENT_W - (perRow - 1) * PHOTO_GAP) / perRow;
+                            const cellH = (photoBudget - (r - 1) * PHOTO_GAP) / r;
+                            const w = Math.min(cellW, cellH * 0.75);
+                            const h = Math.min(cellH, w / 0.75);
+                            const fill = (w * h) / (cellW * cellH);
+                            const score = w * h * fill;
+                            if (score > bestScore) { best = r; bestScore = score; }
+                        }
+                        return best;
+                    };
+                    const fillRowCount = photosFillPage ? pickRowCount(photoCount) : 1;
+                    const fillRowH = Math.floor((photoBudget - (fillRowCount - 1) * PHOTO_GAP) / fillRowCount);
+                    const fillRows = [];
+                    if (photosFillPage) {
+                        const base = Math.floor(photoCount / fillRowCount);
+                        let extra = photoCount % fillRowCount;
+                        let idx = 0;
+                        for (let r = 0; r < fillRowCount; r++) {
+                            const take = base + (extra > 0 ? 1 : 0);
+                            if (extra > 0) extra--;
+                            fillRows.push(photos.slice(idx, idx + take));
+                            idx += take;
+                        }
+                    }
                     const pageBreaks = lo?.graphPageBreaks || formData.graphPageBreaks || {};
                     const graphSpacing = lo?.graphSpacing ?? (chartCount >= 4 ? 3 : 6);
 
@@ -2434,12 +2472,27 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                     );
                                 })}
 
-                                {/* Photos — adaptive grid */}
-                                {hasPhotos && (
+                                {/* Photos-only page: fixed-height rows sized to fill the printed page */}
+                                {photosFillPage && (
+                                    <div className="cert-photos-section" style={{ marginTop: 0, padding: '4px 4px 6px', flex: '0 0 auto' }}>
+                                        <div className="cert-photos-header" style={{ fontSize: '0.65rem', marginBottom: '4px', paddingBottom: '2px' }}>SITE PHOTOS</div>
+                                        {fillRows.map((rowPhotos, r) => (
+                                            <div key={r} style={{ display: 'flex', gap: `${PHOTO_GAP}px`, height: `${fillRowH}px`, marginTop: r > 0 ? `${PHOTO_GAP}px` : 0 }}>
+                                                {rowPhotos.map((photo, i) => (
+                                                    <div key={i} style={{ flex: 1, overflow: 'hidden', border: '0.75px solid #000' }}>
+                                                        <img src={photo} alt={`Site photo ${r * rowPhotos.length + i + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#f9f9f9', display: 'block' }} />
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {/* Photos sharing the page with graphs — compact adaptive grid */}
+                                {hasPhotos && !photosFillPage && (
                                     <div className="cert-photos-section" style={{
                                         marginTop: hasGraphs ? '6px' : 0,
                                         padding: '4px 4px 6px',
-                                        flex: hasGraphs ? '0 0 auto' : '1 1 auto'
+                                        flex: '0 0 auto'
                                     }}>
                                         <div className="cert-photos-header" style={{ fontSize: '0.65rem', marginBottom: '4px', paddingBottom: '2px' }}>SITE PHOTOS</div>
                                         <div style={{
