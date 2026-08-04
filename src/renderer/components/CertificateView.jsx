@@ -2437,6 +2437,16 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     const pageBreaks = lo?.graphPageBreaks || formData.graphPageBreaks || {};
                     const graphSpacing = lo?.graphSpacing ?? (chartCount >= 4 ? 3 : 6);
 
+                    // Photos sharing the page with graphs: size photo rows to absorb the
+                    // leftover page height (explicit px — print has no definite flex height).
+                    const mixedCols = photoCount === 1 ? 1 : photoCols;
+                    const mixedRows = hasPhotos ? Math.ceil(photoCount / mixedCols) : 0;
+                    const chartsPx = hasGraphs ? chartCount * (uniformChartH + CHART_OVERHEAD) + (chartCount - 1) * graphSpacing : 0;
+                    const mixedPhotoArea = Math.max(0, USABLE_PX - PHOTO_OVERHEAD - chartsPx - (hasGraphs ? 6 : 0));
+                    const mixedItemH = hasPhotos && !photosFillPage
+                        ? Math.max(photoItemHeight, Math.floor((mixedPhotoArea - (mixedRows - 1) * 6) / mixedRows))
+                        : photoItemHeight;
+
                     return (
                         <div className="certificate-paper cert-page-2" style={{ paddingLeft: '44px', pageBreakBefore: 'always', breakBefore: 'page', display: 'flex', flexDirection: 'column', minHeight: '275mm' }}>
                             {renderPreviewHeaderBand()}
@@ -2454,7 +2464,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                             marginTop: idx === 0 ? 0 : graphSpacing,
                                             marginBottom: 0,
                                             padding: '3px 4px',
-                                            flex: `1 1 ${h}px`,
+                                            flex: hasPhotos ? '0 0 auto' : `1 1 ${h}px`,
                                             minHeight: `${Math.min(h, 80)}px`
                                         }}>
                                             <div className="cert-chart-header" style={{ fontSize: chartCount >= 3 ? '0.6rem' : '0.7rem', marginBottom: '2px', paddingBottom: '2px' }}>
@@ -2505,7 +2515,7 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                 <div key={index} style={{
                                                     overflow: 'hidden',
                                                     border: '0.75px solid #000',
-                                                    height: `${photoItemHeight}px`,
+                                                    height: `${mixedItemH}px`,
                                                     maxWidth: photoCount === 1 ? '60%' : '100%'
                                                 }}>
                                                     <img src={photo} alt={`Site photo ${index + 1}`} style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#f9f9f9', display: 'block' }} />
