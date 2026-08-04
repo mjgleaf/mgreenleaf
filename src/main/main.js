@@ -1808,6 +1808,24 @@ const tokenCachePlugin = {
 // emails) — preventing a later background device-code prompt just for Mail.Send.
 const APP_SCOPES = ['Files.Read.All', 'Sites.Read.All', 'Sites.ReadWrite.All', 'Mail.Send'];
 
+// The hydrowates.com tenant blocks regular users from consenting to these scopes, so
+// Microsoft shows "Need admin approval" and sign-in dies until an admin grants
+// tenant-wide consent. This also re-triggers whenever a NEW scope is added to the app
+// (Mail.Send, SharePoint AllSites.Read) because the old grant doesn't cover it.
+function isAdminConsentError(error) {
+    const text = `${error?.errorCode || ''} ${error?.subError || ''} ${error?.message || ''}`;
+    return /AADSTS65001|AADSTS65004|AADSTS90094|AADSTS90095|consent_required|admin approval|administrator has not consented/i.test(text);
+}
+
+function adminConsentGuidance(clientId, tenantId) {
+    return 'Sign-in blocked: OSCAR Dashboard needs one-time approval from a hydrowates.com admin ' +
+        '("Need admin approval" screen). An admin can approve it for ALL users at once: ' +
+        `open https://login.microsoftonline.com/${tenantId}/adminconsent?client_id=${clientId} ` +
+        'and sign in with the admin account — or in the Entra admin center go to ' +
+        'Enterprise applications → OSCAR Dashboard → Permissions → "Grant admin consent for hydrowates". ' +
+        'Then sign in to OSCAR again. (Repeat this whenever a new version adds a Microsoft permission.)';
+}
+
 // options.silentOnly: when true, never fall back to an interactive device-code sign-in —
 //   throw instead. Background senders (leak/cert email) use this so they fail and retry
 //   quietly rather than launching a Microsoft login the user never initiated.
@@ -1921,6 +1939,12 @@ async function getAccessToken(scopes = ['Files.Read.All', 'Sites.Read.All'], { s
         console.error('   Message:', error.message);
         console.error('   Error code:', error.errorCode);
         console.error('   Suberror:', error.subError);
+
+        if (isAdminConsentError(error)) {
+            const guidance = adminConsentGuidance(clientId, tenantId);
+            if (mainWindow) mainWindow.webContents.send('auth-message', guidance);
+            throw new Error(guidance);
+        }
 
         // Propagate the actual error message
         throw new Error(`Authentication Failed: ${error.message}`);
@@ -2662,16 +2686,29 @@ async function getSharePointRestToken(hostname) {
         return result.accessToken;
     } catch (silentErr) {
         console.log('⚠️ Silent SP REST token failed, running device-code consent for SP scope:', silentErr.message);
-        const result = await msalClient.acquireTokenByDeviceCode({
-            scopes,
-            deviceCodeCallback: (response) => {
-                console.log('📱 SP REST consent device code:', response.userCode);
-                if (response.verificationUri) shell.openExternal(response.verificationUri);
-                if (mainWindow) mainWindow.webContents.send('auth-message', response.message);
+        try {
+            const result = await msalClient.acquireTokenByDeviceCode({
+                scopes,
+                deviceCodeCallback: (response) => {
+                    console.log('📱 SP REST consent device code:', response.userCode);
+                    if (response.verificationUri) shell.openExternal(response.verificationUri);
+                    if (mainWindow) mainWindow.webContents.send('auth-message', response.message);
+                }
+            });
+            if (mainWindow) mainWindow.webContents.send('auth-message', '');
+            return result.accessToken;
+        } catch (err) {
+            if (isAdminConsentError(err)) {
+                const settings = loadSettings();
+                const guidance = adminConsentGuidance(
+                    settings.clientId || process.env.AZURE_CLIENT_ID,
+                    settings.tenantId || process.env.AZURE_TENANT_ID
+                );
+                if (mainWindow) mainWindow.webContents.send('auth-message', guidance);
+                throw new Error(guidance);
             }
-        });
-        if (mainWindow) mainWindow.webContents.send('auth-message', '');
-        return result.accessToken;
+            throw err;
+        }
     }
 }
 
