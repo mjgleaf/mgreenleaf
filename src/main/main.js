@@ -20,6 +20,24 @@ const {
     WEIGHT_CONVERSION,
 } = require('./config/hardware');
 
+// The safety log is the crash-recovery net for in-progress recordings. Never
+// destroy one that has data in it — rename it to a timestamped archive so a
+// mis-click or a premature clear can always be undone from disk.
+function archiveSafetyLogFile(logPath) {
+    try {
+        if (!fs.existsSync(logPath)) return;
+        const stats = fs.statSync(logPath);
+        if (stats.size <= 10) { fs.unlinkSync(logPath); return; }
+        const dir = path.dirname(logPath);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        fs.renameSync(logPath, path.join(dir, `safety-log-${stamp}.jsonl.bak`));
+        const archives = fs.readdirSync(dir).filter(f => /^safety-log-.*\.jsonl\.bak$/.test(f)).sort();
+        while (archives.length > 5) {
+            try { fs.unlinkSync(path.join(dir, archives.shift())); } catch (e) { }
+        }
+    } catch (e) { }
+}
+
 class T24Reader {
     constructor() {
         this.device = null;
@@ -393,14 +411,20 @@ class T24Reader {
         }
     }
 
-    startSafetyLog(intervalMs = 0) {
+    startSafetyLog(intervalMs = 0, preserve = false) {
         this.isLogging = true;
         this.firstTimestamp = null;
         this.logInterval = intervalMs;
         this.lastLoggedTimestamps.clear();
-        // Clear previous log if any
-        if (fs.existsSync(this.logFilePath)) {
-            try { fs.unlinkSync(this.logFilePath); } catch (e) { }
+        if (preserve && fs.existsSync(this.logFilePath)) {
+            // Resuming a recovered session: keep appending to the existing log,
+            // with Elapsed continuous from its first sample.
+            try {
+                const firstLine = fs.readFileSync(this.logFilePath, 'utf-8').split('\n').find(l => l.trim());
+                if (firstLine) this.firstTimestamp = JSON.parse(firstLine).timestamp || null;
+            } catch (e) { }
+        } else {
+            archiveSafetyLogFile(this.logFilePath);
         }
         this.updatePowerSaveBlocker();
 
@@ -534,9 +558,7 @@ class T24Reader {
     }
 
     clearSafetyLog() {
-        if (fs.existsSync(this.logFilePath)) {
-            try { fs.unlinkSync(this.logFilePath); } catch (e) { }
-        }
+        archiveSafetyLogFile(this.logFilePath);
     }
 
     tare(tag) {
@@ -3221,14 +3243,12 @@ app.whenReady().then(() => {
 
     ipcMain.handle('t24:clearRecovery', () => {
         const logPath = path.join(app.getPath('userData'), 'safety-log.jsonl');
-        if (fs.existsSync(logPath)) {
-            try { fs.unlinkSync(logPath); } catch (e) { }
-        }
+        archiveSafetyLogFile(logPath);
         return true;
     });
 
-    ipcMain.on('t24:startSafetyLog', (event, intervalMs) => {
-        t24Reader.startSafetyLog(intervalMs);
+    ipcMain.on('t24:startSafetyLog', (event, intervalMs, preserve) => {
+        t24Reader.startSafetyLog(intervalMs, preserve);
     });
 
     ipcMain.on('t24:stopSafetyLog', () => {

@@ -384,6 +384,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     };
 
     const handleDiscardRecovery = async () => {
+        if (!window.confirm('Discard the recovered test session?\n\nThe data will be archived on disk (not deleted), but OSCAR will no longer offer to restore it.')) return;
         if (getElectronAPI().clearRecovery) {
             await getElectronAPI().clearRecovery();
         }
@@ -470,9 +471,9 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         setAllJobs(updatedJobs);
         setActiveJobId(finalJobId);
 
-        if (getElectronAPI().clearRecovery) {
-            getElectronAPI().clearRecovery();
-        }
+        // Note: the crash-recovery log is NOT cleared here. LiveView retires it
+        // itself once the recording has a verified durable copy — and a CSV
+        // import (which also lands here) should never touch it.
         setRecoverySession(null);
         setActiveTab('report');
     };

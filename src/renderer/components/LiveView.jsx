@@ -450,6 +450,14 @@ function LiveView({
                 setCellCount(Math.max(cellCount, recoveryTags.length));
             }
             recoveryAppliedRef.current = true;
+            // Restart the on-disk safety nets for the restored session: keep
+            // appending to the existing safety log (preserve — don't wipe the
+            // data being recovered) and resume the 60s autosave.
+            if (getElectronAPI().startSafetyLog) {
+                getElectronAPI().startSafetyLog(logInterval, true);
+            }
+            if (autosaveRefA.current) clearInterval(autosaveRefA.current);
+            autosaveRefA.current = setInterval(() => performAutosave({ label: null, setLoggedData }), 60000);
         }
     }, [recoveryData]);
 
@@ -510,17 +518,41 @@ function LiveView({
     // Returns an error string to show in the panel, or null on success / when a
     // job-number prompt is opened instead.
     const stopTest = async (ctx) => {
+        const api = getElectronAPI();
         ctx.setIsLogging(false);
-        if (!ctx.otherIsLogging && getElectronAPI().stopSafetyLog) {
-            getElectronAPI().stopSafetyLog();
-        }
         if (ctx.autosaveRef.current) { clearInterval(ctx.autosaveRef.current); ctx.autosaveRef.current = null; }
 
         const data = ctx.loggedData;
         const testMarkers = ctx.markers;
         if (!data || data.length === 0) {
+            if (!ctx.otherIsLogging && api.stopSafetyLog) api.stopSafetyLog();
             return 'No data was recorded. Nothing to save.';
         }
+
+        // Durably write the recording to its own session file BEFORE anything
+        // else can go wrong — a crash, a failed dashboard write or a mis-click
+        // in the dialogs below can no longer destroy it.
+        let backedUp = false;
+        if (api.saveSession) {
+            const baseName = selectedJob?.QuoteNum || jobInput || 'recording';
+            const result = await api.saveSession({
+                name: ctx.label ? `${baseName} — ${ctx.label}` : baseName,
+                data,
+                meta: { markers: testMarkers, source: 'live-view' }
+            });
+            backedUp = !!result?.success;
+        }
+
+        if (!ctx.otherIsLogging && api.stopSafetyLog) api.stopSafetyLog();
+
+        // Only retire the crash-recovery log and rolling autosave once this
+        // recording has a durable copy of its own and no other test is still
+        // relying on them. (clearRecovery archives the log, never deletes it.)
+        const clearNets = () => {
+            if (!backedUp || ctx.otherIsLogging) return;
+            if (api.clearRecovery) api.clearRecovery();
+            if (api.clearAutosave) api.clearAutosave();
+        };
 
         if (selectedJob?.QuoteNum) {
             const metadata = {
@@ -533,10 +565,11 @@ function LiveView({
             };
             onSaveLog(data, selectedJob.QuoteNum, metadata);
             const csvName = ctx.label ? `${selectedJob.QuoteNum}-${ctx.label.replace(/\s+/g, '')}` : selectedJob.QuoteNum;
-            await getElectronAPI().saveCSV(data, csvName);
+            await api.saveCSV(data, csvName);
+            clearNets();
             ctx.setLoggedData([]);
             ctx.setMarkers([]);
-            return null;
+            return backedUp ? null : 'Saved to job, but the backup session file could not be written — keep this window open until you verify the data in Reports.';
         }
 
         // No SharePoint job — collect a job number via the modal.
@@ -544,6 +577,8 @@ function LiveView({
             data,
             markers: testMarkers,
             label: ctx.label,
+            backedUp,
+            clearNets,
             clear: () => { ctx.setLoggedData([]); ctx.setMarkers([]); }
         });
         setShowJobPrompt(true);
@@ -561,6 +596,7 @@ function LiveView({
         if (p) {
             onSaveLog(p.data, upperJob, { markers: p.markers, ...(p.label ? { fileName: p.label } : {}) });
             await getElectronAPI().saveCSV(p.data, p.label ? `${upperJob}-${p.label.replace(/\s+/g, '')}` : upperJob);
+            p.clearNets?.();
             p.clear?.();
         }
         setShowJobPrompt(false);
@@ -570,7 +606,18 @@ function LiveView({
     };
 
     const cancelSave = () => {
-        pendingPrompt?.clear?.();
+        const p = pendingPrompt;
+        const count = p?.data?.length || 0;
+        if (count > 0) {
+            const backupNote = p?.backedUp
+                ? 'A backup copy was saved to Session History, but it will not appear in your jobs.'
+                : 'It has NOT been backed up — it will be gone for good.';
+            if (!window.confirm(`Discard this recording (${count.toLocaleString()} samples)?\n\n${backupNote}`)) return;
+        }
+        // clearNets only retires the safety log when a durable backup exists, so
+        // an un-backed-up recording stays recoverable even after a discard.
+        p?.clearNets?.();
+        p?.clear?.();
         setShowJobPrompt(false);
         setJobInput('');
         setError('');

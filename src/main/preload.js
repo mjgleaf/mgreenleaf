@@ -41,7 +41,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     checkRecovery: () => ipcRenderer.invoke('t24:checkRecovery'),
     loadRecovery: () => ipcRenderer.invoke('t24:loadRecovery'),
     clearRecovery: () => ipcRenderer.invoke('t24:clearRecovery'),
-    startSafetyLog: (intervalMs) => ipcRenderer.send('t24:startSafetyLog', intervalMs),
+    startSafetyLog: (intervalMs, preserve) => ipcRenderer.send('t24:startSafetyLog', intervalMs, preserve),
     stopSafetyLog: () => ipcRenderer.send('t24:stopSafetyLog'),
     wakeSensors: () => ipcRenderer.invoke('t24:wakeSensors'),
 
