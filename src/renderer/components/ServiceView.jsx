@@ -90,6 +90,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     // --- Lifted Live Telemetry & Logging State ---
     const [devices, setDevices] = useState({}); // tag -> latest packet
     const [selectedTags, setSelectedTags] = useState(Array(10).fill(null));
+    const [tagNames, setTagNames] = useState({}); // tag hex -> friendly name (persisted in settings)
     const [cellCount, setCellCount] = useState(1);
     const [isLogging, setIsLogging] = useState(false);
     const [loggedData, setLoggedData] = useState([]);
@@ -266,6 +267,30 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         return () => clearTimeout(timer);
     }, [allJobs, activeJobId]);
 
+    // Load friendly tag names from settings once on mount
+    useEffect(() => {
+        getElectronAPI().loadSettings().then(settings => {
+            if (settings?.t24TagNames) setTagNames(settings.t24TagNames);
+        }).catch(() => { });
+    }, []);
+
+    // Rename a load cell tag (empty/whitespace name clears it). Display-only:
+    // logged data and calibration always keep the raw hex tag.
+    const renameTag = async (tag, name) => {
+        const trimmed = (name || '').trim();
+        const next = { ...tagNames };
+        if (trimmed) next[tag] = trimmed;
+        else delete next[tag];
+        setTagNames(next);
+        try {
+            const settings = await getElectronAPI().loadSettings() || {};
+            settings.t24TagNames = next;
+            await getElectronAPI().saveSettings(settings);
+        } catch (err) {
+            console.error('Failed to save tag names:', err);
+        }
+    };
+
     // Active Polling & Keep Awake Sync (Persistent across tabs)
     useEffect(() => {
         const activeTags = selectedTags.slice(0, cellCount);
@@ -292,10 +317,11 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             selectedTags,
             cellCount,
             isLogging,
+            tagNames,
             activeJobName: selectedSharePointJob?.JobName || selectedSharePointJob?.QuoteNum
                 || (allJobs.find(j => j.id?.toString() === activeJobId?.toString())?.metadata?.jobNumber) || ''
         });
-    }, [selectedTags, cellCount, isLogging, companionRunning, selectedSharePointJob, activeJobId, allJobs]);
+    }, [selectedTags, cellCount, isLogging, tagNames, companionRunning, selectedSharePointJob, activeJobId, allJobs]);
 
     useEffect(() => {
         const openPhases = [];
@@ -851,6 +877,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 devices={devices}
                                 selectedTags={selectedTags}
                                 setSelectedTags={setSelectedTags}
+                                tagNames={tagNames}
+                                onRenameTag={renameTag}
                                 cellCount={cellCount}
                                 setCellCount={setCellCount}
                                 isLogging={isLogging}

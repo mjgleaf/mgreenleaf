@@ -96,32 +96,28 @@ class T24Reader {
     }
 
     autoDetectTag(tagHex, samples) {
-        // Endianness and unit (tonnes vs raw) are properties of the T24 dongle's
-        // firmware and are shared by EVERY tag it reports. If we already know other
-        // tags, a newly-seen tag uses the SAME format -- inherit it rather than
-        // guessing from sample magnitude. The magnitude-based guess below can lock
-        // onto the wrong endianness, which scrambles the float bytes and produces
-        // erratic, wildly-swinging readings (the tag-2075 LE mis-detection bug).
+        // Endianness is a property of the T24 dongle's firmware and is shared by
+        // EVERY tag it reports, so a newly-seen tag can inherit it from known tags
+        // (guessing endianness from magnitude scrambled the float bytes in the
+        // tag-2075 LE mis-detection bug). The UNIT (tonnes vs raw lbs), however,
+        // is calibrated per transmitter module and must NOT be inherited: LL-1053
+        // (tag 58E3) transmits raw lbs but inherited "tonnes" from earlier tags,
+        // so every reading was multiplied by 2204.62. Always score the unit from
+        // this tag's own samples, restricting to the known endianness if any.
         const consensus = this.getKnownFormatConsensus(tagHex);
+        const endianOptions = consensus ? [consensus.useFloatLE] : [false, true];
         if (consensus) {
-            const config = {};
-            if (consensus.skipTonnesConversion) config.skipTonnesConversion = true;
-            if (consensus.useFloatLE) config.useFloatLE = true;
-            console.log(`[AUTO-DETECT] Tag ${tagHex}: inheriting ${consensus.label} from known tags`);
-            this.calibrationConfig[tagHex] = { ...config, ...(this.calibrationConfig[tagHex] || {}) };
-            this.saveCalibration();
-            return;
+            console.log(`[AUTO-DETECT] Tag ${tagHex}: inheriting ${consensus.useFloatLE ? 'LE' : 'BE'} endianness from known tags`);
         }
 
-        // No known tags to learn from -- fall back to guessing the format.
-        // Try all 4 combinations: BE/LE x raw/tonnes-converted
-        // Pick the one where values are most reasonable for a load cell reading in lbs
-        const combos = [
-            { useFloatLE: false, skipTonnesConversion: false, label: 'BE+tonnes' },
-            { useFloatLE: false, skipTonnesConversion: true, label: 'BE+raw' },
-            { useFloatLE: true, skipTonnesConversion: false, label: 'LE+tonnes' },
-            { useFloatLE: true, skipTonnesConversion: true, label: 'LE+raw' },
-        ];
+        // Try each candidate combination and pick the one where values are most
+        // reasonable for a load cell reading in lbs.
+        const combos = [];
+        for (const useFloatLE of endianOptions) {
+            const endianLabel = useFloatLE ? 'LE' : 'BE';
+            combos.push({ useFloatLE, skipTonnesConversion: false, label: `${endianLabel}+tonnes` });
+            combos.push({ useFloatLE, skipTonnesConversion: true, label: `${endianLabel}+raw` });
+        }
 
         let bestCombo = combos[0];
         let bestScore = Infinity;
@@ -179,31 +175,22 @@ class T24Reader {
         this.saveCalibration();
     }
 
-    // Returns the float format ({useFloatLE, skipTonnesConversion}) shared by all
-    // already-known tags, or null if there are none or they disagree. New tags
-    // inherit this so they match the dongle's actual byte order/unit instead of
-    // independently guessing (which can pick the wrong endianness).
+    // Returns the float endianness ({useFloatLE}) shared by all already-known
+    // tags, or null if there are none or they disagree. New tags inherit this so
+    // they match the dongle's actual byte order instead of independently guessing
+    // (which can pick the wrong endianness). The unit (skipTonnesConversion) is
+    // deliberately NOT part of the consensus -- it varies per transmitter module.
     getKnownFormatConsensus(excludeTag) {
         const formats = [];
         for (const [tag, cfg] of Object.entries(this.calibrationConfig)) {
             if (tag === excludeTag || !cfg || typeof cfg !== 'object') continue;
-            formats.push({
-                useFloatLE: !!cfg.useFloatLE,
-                skipTonnesConversion: !!cfg.skipTonnesConversion
-            });
+            formats.push({ useFloatLE: !!cfg.useFloatLE });
         }
         if (formats.length === 0) return null;
         const first = formats[0];
-        const allAgree = formats.every(f =>
-            f.useFloatLE === first.useFloatLE &&
-            f.skipTonnesConversion === first.skipTonnesConversion
-        );
+        const allAgree = formats.every(f => f.useFloatLE === first.useFloatLE);
         if (!allAgree) return null;
-        return {
-            useFloatLE: first.useFloatLE,
-            skipTonnesConversion: first.skipTonnesConversion,
-            label: `${first.useFloatLE ? 'LE' : 'BE'}+${first.skipTonnesConversion ? 'raw' : 'tonnes'}`
-        };
+        return { useFloatLE: first.useFloatLE };
     }
 
     saveCalibration() {
@@ -1117,6 +1104,7 @@ function loadSettings() {
         openaiKey: process.env.OPENAI_API_KEY || bundled.openaiKey || '',
         t24GroupId: DEFAULT_GROUP_ID,
         t24ScaleFactors: {},
+        t24TagNames: {}, // tag hex -> friendly name (e.g. "58E3": "LL-1053")
         // C.H. Robinson Navisphere credentials
         chrUsername: bundled.chrUsername || '',
         chrPassword: bundled.chrPassword || '',
