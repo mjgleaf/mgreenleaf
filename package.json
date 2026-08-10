@@ -38,6 +38,10 @@
       {
         "from": "config/app-defaults.json",
         "to": "app-defaults.json"
+      },
+      {
+        "from": "config/calibration.json",
+        "to": "calibration.json"
       }
     ],
     "publish": {
