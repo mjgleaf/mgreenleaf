@@ -4,6 +4,7 @@ import ErrorBoundary from './ErrorBoundary';
 import LiveGraph from './LiveGraph';
 import CustomerReport from './CustomerReport';
 import { getElectronAPI } from '../utils/electronAPI';
+import { getTagLabel } from '../utils/tagNames';
 
 // ── Unit Conversion Calculator ──
 function ConverterTab() {
@@ -241,6 +242,7 @@ function CustomerView({ onGoHome }) {
     const [deviceStatus, setDeviceStatus] = useState('disconnected');
     const [devices, setDevices] = useState({});
     const [selectedTags, setSelectedTags] = useState(Array(10).fill(null));
+    const [tagNames, setTagNames] = useState({}); // tag hex -> friendly name (managed in Service mode)
     const [cellCount, setCellCount] = useState(1);
     const [isLogging, setIsLogging] = useState(false);
     const [loggedData, setLoggedData] = useState([]);
@@ -316,6 +318,7 @@ function CustomerView({ onGoHome }) {
                 setShowWelcome(true);
                 setWelcomeStep(0);
             }
+            if (settings?.t24TagNames) setTagNames(settings.t24TagNames);
             if (settings?.customerPrefs) {
                 const p = settings.customerPrefs;
                 if (p.cellCount) setCellCount(p.cellCount);
@@ -1101,7 +1104,7 @@ function CustomerView({ onGoHome }) {
                                     <select className="slot-dropdown" value={selectedTag || 'none'}
                                         onChange={(e) => handleTagChange(index, e.target.value)} disabled={isLogging}>
                                         <option value="none">-- Unassigned --</option>
-                                        {tags.map(tag => <option key={tag} value={tag}>Tag: {tag}</option>)}
+                                        {tags.map(tag => <option key={tag} value={tag}>{getTagLabel(tag, tagNames)}</option>)}
                                     </select>
                                 </div>
                                 <div className="slot-body">
@@ -1222,6 +1225,7 @@ function CustomerView({ onGoHome }) {
                         <LiveGraph
                             data={isLogging ? loggedData : (loggedData.length > 0 ? loggedData : previewData)}
                             activeTags={selectedTags.slice(0, cellCount)}
+                            tagNames={tagNames}
                             displayUnit={displayUnit}
                             onUnitChange={setDisplayUnit}
                             xUnit={xUnit}

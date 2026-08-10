@@ -1543,6 +1543,22 @@ body {
   max-width: 110px;
 }
 
+.rename-tag-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  line-height: 1.2;
+  margin-left: 6px;
+}
+
+.rename-tag-btn:hover {
+  background: var(--bg-dark);
+  border-color: var(--accent-hover, var(--text-secondary));
+}
+
 .slot-body {
   display: flex;
   flex-direction: column;

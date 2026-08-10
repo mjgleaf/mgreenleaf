@@ -892,7 +892,7 @@
 
                     html += `
                         <div class="cell ${isOverload ? 'overload' : ''}">
-                            <div class="cell-tag">Cell ${i + 1} &middot; ${tag}</div>
+                            <div class="cell-tag">Cell ${i + 1} &middot; ${(state.tagNames && state.tagNames[tag]) || tag}</div>
                             <div class="cell-value">${fmt(val, 1)}</div>
                             <div class="cell-unit">lbs</div>
                             ${peak ? `<div class="cell-peak">Peak: ${fmt(Math.abs(peak), 1)} lbs</div>` : ''}

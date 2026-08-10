@@ -27,6 +27,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getJobsCache: () => ipcRenderer.invoke('sharepoint:getJobsCache'),
     fetchEquipmentForJob: (jobNum) => ipcRenderer.invoke('sharepoint:fetchEquipmentForJob', jobNum),
     logout: () => ipcRenderer.invoke('sharepoint:logout'),
+
+    // Job-Assigned Certificate Templates (shared via SharePoint)
+    listTemplates: () => ipcRenderer.invoke('templates:list'),
+    listTemplatesForJob: (jobNumber) => ipcRenderer.invoke('templates:listForJob', jobNumber),
+    saveTemplate: (payload) => ipcRenderer.invoke('templates:save', payload),
+    deleteTemplate: (id) => ipcRenderer.invoke('templates:delete', id),
+    getTemplatesCache: () => ipcRenderer.invoke('templates:getCache'),
     determineStandard: (answers) => ipcRenderer.invoke('ai:determineStandard', answers),
     generateCertTemplate: (description, history, currentState) => ipcRenderer.invoke('ai:generateCertTemplate', description, history, currentState),
     optimizeCertLayout: (metrics) => ipcRenderer.invoke('ai:optimizeCertLayout', metrics),
@@ -84,11 +91,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     certNextNumber: () => ipcRenderer.invoke('cert:nextNumber'),
     certRegister: (entry) => ipcRenderer.invoke('cert:register', entry),
     certListRegistry: () => ipcRenderer.invoke('cert:listRegistry'),
-
-    // Job Templates (SharePoint "OSCAR Job Templates" list)
-    certSaveTemplate: (jobNumber, template) => ipcRenderer.invoke('cert:saveTemplate', jobNumber, template),
-    certLoadTemplate: (jobNumber) => ipcRenderer.invoke('cert:loadTemplate', jobNumber),
-    certListTemplates: () => ipcRenderer.invoke('cert:listTemplates'),
 
     // Customer Export
     exportCustomerPackage: (opts) => ipcRenderer.invoke('export:customerPackage', opts),

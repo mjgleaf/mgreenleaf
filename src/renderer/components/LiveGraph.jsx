@@ -15,7 +15,7 @@ import {
 const colors = ['#3fb950', '#2188ff', '#f85149', '#dbab09', '#8957e5', '#f0883e', '#1f6feb', '#238636', '#fa4549', '#e3b341'];
 const MAX_CHART_POINTS = 500;
 
-function LiveGraph({ data, markers = [], activeTags, companyName, jobNumber, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChange }) {
+function LiveGraph({ data, markers = [], activeTags, tagNames = {}, companyName, jobNumber, displayUnit = 'lbs', onUnitChange, xUnit, onXUnitChange }) {
     const [viewMode, setViewMode] = useState('auto');
     const [fixedDuration, setFixedDuration] = useState(120);
     const [yZoom, setYZoom] = useState([0, 'auto']);
@@ -215,7 +215,7 @@ function LiveGraph({ data, markers = [], activeTags, companyName, jobNumber, dis
                                 key={tag}
                                 type="monotone"
                                 dataKey={tag}
-                                name={`Cell ${tag}`}
+                                name={tagNames[tag] || `Cell ${tag}`}
                                 stroke={streamSettings[tag]?.color || colors[i % colors.length]}
                                 strokeDasharray={streamSettings[tag]?.dashed ? "5 5" : defaultDash}
                                 strokeWidth={defaultWidth}
@@ -233,7 +233,7 @@ function LiveGraph({ data, markers = [], activeTags, companyName, jobNumber, dis
             <div className="stream-customizer" style={{ display: 'flex', flexWrap: 'wrap', gap: '20px', marginTop: '15px', borderTop: '1px solid var(--border)', paddingTop: '15px' }}>
                 {activeTags.map((tag, i) => tag && (
                     <div key={tag} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem' }}>
-                        <span style={{ fontWeight: 'bold' }}>Cell {tag}:</span>
+                        <span style={{ fontWeight: 'bold' }}>{tagNames[tag] || `Cell ${tag}`}:</span>
                         <input
                             type="color"
                             value={streamSettings[tag]?.color || colors[i % colors.length]}

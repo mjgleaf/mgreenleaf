@@ -10,6 +10,7 @@ import ReportView from './ReportView';
 import CertificateView from './CertificateView';
 import { SettingsView } from './SettingsView';
 import JobSelector from './JobSelector';
+import TemplatesView from './TemplatesView';
 import { QRCodeSVG } from 'qrcode.react';
 import { getElectronAPI } from '../utils/electronAPI';
 
@@ -69,6 +70,13 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const [showSaveCertPrompt, setShowSaveCertPrompt] = useState(false);
     const [pendingLeaveCert, setPendingLeaveCert] = useState(null);
 
+    // Template builder: the template being edited (null = build a new blank one).
+    const [editingTemplate, setEditingTemplate] = useState(null);
+    const openTemplateBuilder = (tpl = null) => {
+        setEditingTemplate(tpl);
+        setActiveTab('template-builder');
+    };
+
     // Companion Server state
     const [companionRunning, setCompanionRunning] = useState(false);
     const [companionIPs, setCompanionIPs] = useState([]);
@@ -92,6 +100,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
     // Test A
     const [selectedTags, setSelectedTags] = useState(Array(10).fill(null));
+    const [tagNames, setTagNames] = useState({}); // tag hex -> friendly name (persisted in settings)
     const [cellCount, setCellCount] = useState(1);
     const [isLogging, setIsLogging] = useState(false);
     const [loggedData, setLoggedData] = useState([]);
@@ -295,6 +304,30 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         return () => clearTimeout(timer);
     }, [allJobs, activeJobId]);
 
+    // Load friendly tag names from settings once on mount
+    useEffect(() => {
+        getElectronAPI().loadSettings().then(settings => {
+            if (settings?.t24TagNames) setTagNames(settings.t24TagNames);
+        }).catch(() => { });
+    }, []);
+
+    // Rename a load cell tag (empty/whitespace name clears it). Display-only:
+    // logged data and calibration always keep the raw hex tag.
+    const renameTag = async (tag, name) => {
+        const trimmed = (name || '').trim();
+        const next = { ...tagNames };
+        if (trimmed) next[tag] = trimmed;
+        else delete next[tag];
+        setTagNames(next);
+        try {
+            const settings = await getElectronAPI().loadSettings() || {};
+            settings.t24TagNames = next;
+            await getElectronAPI().saveSettings(settings);
+        } catch (err) {
+            console.error('Failed to save tag names:', err);
+        }
+    };
+
     // Active Polling & Keep Awake Sync (Persistent across tabs)
     useEffect(() => {
         const activeTags = [
@@ -324,10 +357,11 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             selectedTags,
             cellCount,
             isLogging: isLogging || (dualMode && isLoggingB),
+            tagNames,
             activeJobName: selectedSharePointJob?.JobName || selectedSharePointJob?.QuoteNum
                 || (allJobs.find(j => j.id?.toString() === activeJobId?.toString())?.metadata?.jobNumber) || ''
         });
-    }, [selectedTags, cellCount, isLogging, isLoggingB, dualMode, companionRunning, selectedSharePointJob, activeJobId, allJobs]);
+    }, [selectedTags, cellCount, isLogging, isLoggingB, dualMode, tagNames, companionRunning, selectedSharePointJob, activeJobId, allJobs]);
 
     useEffect(() => {
         const openPhases = [];
@@ -851,6 +885,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                             📱 Companion{companionRunning ? ` (${companionClients})` : ''}
                         </button>
                         <button className={`nav-btn ${activeTab === 'leaks' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('leaks'))}>💧 Leak Logs{companionLeaks.length > 0 ? ` (${companionLeaks.length})` : ''}</button>
+                        <button className={`nav-btn ${activeTab === 'templates' || activeTab === 'template-builder' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('templates'))}>📋 Templates</button>
 
                         <div className="flex-grow"></div>
                         <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => leaveCert(() => setActiveTab('settings'))}>⚙️ Settings</button>
@@ -895,6 +930,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 setDualMode={setDualMode}
                                 selectedTags={selectedTags}
                                 setSelectedTags={setSelectedTags}
+                                tagNames={tagNames}
+                                onRenameTag={renameTag}
                                 cellCount={cellCount}
                                 setCellCount={setCellCount}
                                 isLogging={isLogging}
@@ -1270,6 +1307,39 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                                 </div>
                             )}
                         </div>
+                    )}
+                    {activeTab === 'templates' && (
+                        <TemplatesView
+                            onNewTemplate={() => openTemplateBuilder(null)}
+                            onEditTemplate={(tpl) => openTemplateBuilder(tpl)}
+                        />
+                    )}
+                    {activeTab === 'template-builder' && (
+                        <ErrorBoundary>
+                            <CertificateView
+                                templateMode
+                                jobId={null}
+                                data={editingTemplate ? {
+                                    metadata: {
+                                        certData: editingTemplate.formData,
+                                        certLayout: editingTemplate.certLayout,
+                                        testSchema: editingTemplate.testSchema,
+                                        jobNumber: editingTemplate.jobNumber,
+                                        templateId: editingTemplate.id,
+                                        templateName: editingTemplate.name,
+                                        templateDescription: editingTemplate.description
+                                    }
+                                } : null}
+                                selectedJob={null}
+                                onUpdateMetadata={() => { }}
+                                onPreviewModeChange={() => { }}
+                                xUnit={xUnit}
+                                displayUnit={displayUnit}
+                                promptAiOnArrival={false}
+                                onAiPromptResolved={() => { }}
+                                onTemplateSaved={() => setActiveTab('templates')}
+                            />
+                        </ErrorBoundary>
                     )}
                     {activeTab === 'settings' && <SettingsView onSettingsSaved={() => { }} />}
                 </div>

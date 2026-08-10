@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import ErrorBoundary from './ErrorBoundary';
 import LiveGraph from './LiveGraph';
 import { getElectronAPI } from '../utils/electronAPI';
+import { getTagLabel } from '../utils/tagNames';
 
 const formatElapsed = (ms) => {
     const totalSec = Math.max(0, Math.round(ms / 1000));
@@ -22,6 +23,8 @@ function TestPanel({
     excludeTags,
     selectedTags,
     setSelectedTags,
+    tagNames = {},
+    onRenameTag,
     cellCount,
     setCellCount,
     isLogging,
@@ -44,6 +47,20 @@ function TestPanel({
     previewData,
 }) {
     const [error, setError] = useState('');
+
+    // Feature: Rename load cell tags (friendly names, e.g. 58E3 -> LL-1053)
+    const [renameTarget, setRenameTarget] = useState(null); // tag hex being renamed, or null
+    const [renameInput, setRenameInput] = useState('');
+
+    const openRename = (tag) => {
+        setRenameTarget(tag);
+        setRenameInput(tagNames[tag] || '');
+    };
+
+    const saveRename = () => {
+        if (renameTarget && onRenameTag) onRenameTag(renameTarget, renameInput);
+        setRenameTarget(null);
+    };
 
     // Peak hold — local to this test so starting one test doesn't reset the
     // other test's peaks.
@@ -264,9 +281,18 @@ function TestPanel({
                                     onChange={(e) => handleTagChange(index, e.target.value)} disabled={isLogging}>
                                     <option value="none">-- Unassigned --</option>
                                     {optionTags(selectedTag).map(tag => (
-                                        <option key={tag} value={tag}>Tag: {tag}</option>
+                                        <option key={tag} value={tag}>{getTagLabel(tag, tagNames)}</option>
                                     ))}
                                 </select>
+                                {selectedTag && (
+                                    <button
+                                        className="rename-tag-btn"
+                                        onClick={() => openRename(selectedTag)}
+                                        title={`Rename tag ${selectedTag}`}
+                                    >
+                                        ✏️
+                                    </button>
+                                )}
                             </div>
                             <div className="slot-body">
                                 <div className="slot-value">
@@ -307,6 +333,38 @@ function TestPanel({
                 })}
             </div>
 
+            {renameTarget && (
+                <div className="modal-overlay">
+                    <div className="job-prompt-card">
+                        <h3>Rename Load Cell</h3>
+                        <p>Set a friendly name for tag <strong>{renameTarget}</strong> (e.g. the serial number painted on the cell). The name is display-only — recordings keep the radio tag.</p>
+                        <div className="form-group mt-4">
+                            <label>Display Name</label>
+                            <input
+                                type="text"
+                                value={renameInput}
+                                onChange={(e) => setRenameInput(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') saveRename(); }}
+                                placeholder="e.g. LL-1053"
+                                className="large-input"
+                                autoFocus
+                            />
+                        </div>
+                        <div className="form-actions mt-4">
+                            <button onClick={saveRename} className="action-btn">Save</button>
+                            {tagNames[renameTarget] && (
+                                <button onClick={() => { onRenameTag && onRenameTag(renameTarget, ''); setRenameTarget(null); }}
+                                    className="action-btn secondary ml-4">
+                                    Clear Name
+                                </button>
+                            )}
+                            <button onClick={() => setRenameTarget(null)} className="action-btn secondary ml-4">Cancel</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+
             <div className="secondary-stats-grid mt-4">
                 <div className="stat-card accent">
                     <h3>Total Short Tons (US)</h3>
@@ -331,6 +389,7 @@ function TestPanel({
                     data={isLogging ? loggedData : panelPreview}
                     markers={isLogging ? markers : []}
                     activeTags={activeTags}
+                    tagNames={tagNames}
                     companyName={selectedJob?.LeadCompany || selectedJob?.Customer}
                     jobNumber={jobNumberLabel}
                     displayUnit={displayUnit}
@@ -353,6 +412,8 @@ function LiveView({
     setDualMode,
     selectedTags,
     setSelectedTags,
+    tagNames = {},
+    onRenameTag,
     cellCount,
     setCellCount,
     isLogging,
@@ -801,6 +862,8 @@ function LiveView({
                     excludeTags={tagsB}
                     selectedTags={selectedTags}
                     setSelectedTags={setSelectedTags}
+                    tagNames={tagNames}
+                    onRenameTag={onRenameTag}
                     cellCount={cellCount}
                     setCellCount={setCellCount}
                     isLogging={isLogging}
@@ -843,6 +906,8 @@ function LiveView({
                         excludeTags={tagsA}
                         selectedTags={selectedTagsB}
                         setSelectedTags={setSelectedTagsB}
+                        tagNames={tagNames}
+                        onRenameTag={onRenameTag}
                         cellCount={cellCountB}
                         setCellCount={setCellCountB}
                         isLogging={isLoggingB}
