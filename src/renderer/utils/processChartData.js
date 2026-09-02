@@ -19,6 +19,12 @@ const pivotMultiTagData = (data) => {
     const bucketSize = 500;
     const buckets = new Map();
     const lastKnown = {}; // Track last known value per tag for interpolation
+    const bucketSeen = new Map(); // bucketTime -> Set of tags with a REAL sample in that bucket
+    // Peak of the INSTANTANEOUS total (carry-forward sum evaluated at each real
+    // sample). The bucketed rows keep per-tag peaks for the chart, but summing
+    // those would pair maxima from different instants and overstate the
+    // certified measured force; this tracks the true applied peak instead.
+    let peakInstantTotal = 0;
 
     data.forEach(row => {
         const tag = row[tagKey];
@@ -33,12 +39,27 @@ const pivotMultiTagData = (data) => {
             });
             if (row.timestamp) newRow.timestamp = row.timestamp;
             buckets.set(bucketTime, newRow);
+            bucketSeen.set(bucketTime, new Set());
         }
 
         const bucket = buckets.get(bucketTime);
+        const seen = bucketSeen.get(bucketTime);
         const val = typeof row.value === 'number' ? row.value : parseFloat(row.value) || 0;
-        bucket[`Cell ${tag}`] = val;
-        lastKnown[tag] = val;
+        const cellKey = `Cell ${tag}`;
+        // Within a bucket, keep the peak-magnitude sample per tag — NOT
+        // last-sample-wins. The certificate's measured force comes from the max
+        // of these rows, and a transient true peak overwritten by a later,
+        // lower sample in the same 500ms window silently understated it.
+        if (!seen.has(tag) || Math.abs(val) > Math.abs(bucket[cellKey])) {
+            bucket[cellKey] = val;
+        }
+        seen.add(tag);
+        lastKnown[tag] = val; // carry-forward into later buckets uses the latest reading
+
+        // Instantaneous total at this real sample (carry-forward for other tags)
+        let instTotal = 0;
+        tags.forEach(t => { instTotal += lastKnown[t] || 0; });
+        if (instTotal > peakInstantTotal) peakInstantTotal = instTotal;
 
         // Recalculate total
         let total = 0;
@@ -46,7 +67,10 @@ const pivotMultiTagData = (data) => {
         bucket['Total Load'] = total;
     });
 
-    return [...buckets.values()].sort((a, b) => a[timeKey] - b[timeKey]);
+    return {
+        rows: [...buckets.values()].sort((a, b) => a[timeKey] - b[timeKey]),
+        peakTotal: peakInstantTotal,
+    };
 };
 
 const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayTimeUnit = 'min', inputTimeUnit = null, xUnit = 'min', chartMode = 'perCell') => {
@@ -54,8 +78,10 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
 
     try {
         // Pivot multi-tag data so each load cell gets its own chart line
-        const pivoted = pivotMultiTagData(data);
-        if (pivoted) {
+        const pivotResult = pivotMultiTagData(data);
+        const pivotPeakTotal = pivotResult ? pivotResult.peakTotal : null;
+        if (pivotResult) {
+            const pivoted = pivotResult.rows;
             if (chartMode === 'combined') {
                 // Combined mode: use pivoted data but only show Total Load line
                 data = pivoted.map(row => {
@@ -157,16 +183,33 @@ const processChartData = (data, serialLabels = [], displayUnit = 'lbs', displayT
             }
         }
         const maxRow = filteredData[maxIndex === -1 ? 0 : maxIndex];
+        // For pivoted multi-cell data, the bucketed rows hold per-tag peaks, so
+        // summing them pairs maxima from different instants. Use the true
+        // instantaneous peak total computed during the pivot instead. (maxRow
+        // stays the bucketed row nearest the peak — used only for peakTime.)
+        if (pivotPeakTotal !== null && pivotPeakTotal > 0) {
+            maxWeight = pivotPeakTotal;
+        }
 
         let peakTime = '';
         if (maxRow) {
+            // The real recording timestamp is authoritative; only fall back to
+            // scanning columns whose HEADER looks like a time field. Scanning
+            // every string value used to grab digit fragments out of
+            // comma-formatted weights (e.g. "28,450.75" → "50:75") and print
+            // them as the certified Time of Test.
             const allValues = Object.entries(maxRow);
-            const timeVal = allValues.find(([k, v]) => v && typeof v === 'string' && /(\d{1,2}[:.]\d{2})/.test(v));
-            if (timeVal) {
-                const match = timeVal[1].match(/(\d{1,2}[:.]\d{2})/);
-                peakTime = match[1].replace('.', ':');
-            } else if (maxRow.timestamp) {
+            const looksLikeClock = (s) => {
+                const m = s.match(/(\d{1,2})[:.](\d{2})/);
+                return m && parseInt(m[2], 10) < 60 ? m : null;
+            };
+            const timeVal = allValues.find(([k, v]) =>
+                v && typeof v === 'string' && /time|clock|hour|stamp|recorded/i.test(k) && looksLikeClock(v));
+            if (maxRow.timestamp) {
                 peakTime = new Date(maxRow.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+            } else if (timeVal) {
+                const match = looksLikeClock(timeVal[1]);
+                peakTime = `${match[1]}:${match[2]}`;
             } else {
                 const tHeader = headers.find(h => /time|clock|hour|recorded/i.test(h));
                 if (tHeader && maxRow[tHeader]) {

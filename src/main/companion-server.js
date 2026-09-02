@@ -183,7 +183,14 @@ class CompanionServer {
                 res.status(400).json({ error: 'phase must be "function" or "static"' });
                 return;
             }
-            if (this.onMarkerToggle) this.onMarkerToggle(phase);
+            // The handler reports whether the marker can land (recording active,
+            // window alive). Refusing honestly lets the phone alert the tech
+            // instead of silently dropping a certified test-phase boundary.
+            const accepted = this.onMarkerToggle ? this.onMarkerToggle(phase) !== false : false;
+            if (!accepted) {
+                res.status(409).json({ error: 'OSCAR is not recording — marker was not recorded' });
+                return;
+            }
             res.json({ success: true });
         });
 

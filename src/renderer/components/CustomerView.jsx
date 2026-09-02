@@ -6,6 +6,12 @@ import CustomerReport from './CustomerReport';
 import { getElectronAPI } from '../utils/electronAPI';
 import { getTagLabel } from '../utils/tagNames';
 
+// Recording-session generation (module scope so it survives remounts). Guards
+// the stale stopLogging continuation: its awaited durable flush leaves a window
+// where the operator can start the NEXT recording, and the old continuation's
+// stopSafetyLog would otherwise kill the new recording's crash-recovery net.
+let customerRecordingGeneration = 0;
+
 // ── Unit Conversion Calculator ──
 function ConverterTab() {
     const [inputVal, setInputVal] = useState('');
@@ -253,6 +259,14 @@ function CustomerView({ onGoHome }) {
     const [xUnit, setXUnit] = useState('min');
     const [sessionName, setSessionName] = useState('');
     const [savedMessage, setSavedMessage] = useState('');
+    // Unsaved recording found on disk (crash / closed before saving) — offered
+    // for restore. The welcome guide promises "data auto-saves every 60s"; this
+    // is the piece that actually gives it back.
+    const [autosaveOffer, setAutosaveOffer] = useState(null);
+    // Crash-recovery log failing to write / unverified unit guesses — the same
+    // warnings ServiceView shows; Customer mode records with the same nets.
+    const [safetyLogError, setSafetyLogError] = useState(null);
+    const [unitNotices, setUnitNotices] = useState([]);
 
     // Feature #1: Overload Alarm
     const [wllThreshold, setWllThreshold] = useState(0); // 0 = disabled
@@ -297,11 +311,13 @@ function CustomerView({ onGoHome }) {
     const autosaveTimerRef = useRef(null);
     const peakValuesRef = useRef({});
     const wllThresholdRef = useRef(0);
+    const loggedDataRef = useRef([]); // always-current buffer for autosave/stop flush
 
     const prefsLoadedRef = useRef(false);
 
     useEffect(() => { selectedTagsRef.current = selectedTags; }, [selectedTags]);
     useEffect(() => { cellCountRef.current = cellCount; }, [cellCount]);
+    useEffect(() => { loggedDataRef.current = loggedData; }, [loggedData]);
     useEffect(() => {
         isLoggingRef.current = isLogging;
         if (!isLogging) lastLoggedTimesRef.current = {};
@@ -324,7 +340,15 @@ function CustomerView({ onGoHome }) {
                 if (p.cellCount) setCellCount(p.cellCount);
                 if (p.logInterval !== undefined) setLogInterval(p.logInterval);
                 if (p.wllThreshold !== undefined) setWllThreshold(p.wllThreshold);
-                if (p.keepAwake !== undefined) setKeepAwake(p.keepAwake);
+                if (p.keepAwake !== undefined) {
+                    setKeepAwake(p.keepAwake);
+                    // Restoring the checkbox without engaging the blocker left
+                    // the PC free to idle-sleep while the UI said Keep Awake was
+                    // on — transmitters then dropped right before the lift.
+                    if (p.keepAwake) {
+                        getElectronAPI().toggleKeepAwake(true).catch(() => { });
+                    }
+                }
                 if (p.displayUnit) setDisplayUnit(p.displayUnit);
                 if (p.xUnit) setXUnit(p.xUnit);
             }
@@ -379,6 +403,41 @@ function CustomerView({ onGoHome }) {
     // Load session history on mount
     useEffect(() => {
         loadSessionList();
+        // Offer any unsaved recording left on disk by a crash or an app close
+        // before saving. (New recordings archive this file rather than
+        // overwriting it, so the offer stays valid until acted on.)
+        (async () => {
+            const api = getElectronAPI();
+            if (!api.loadAutosave) return;
+            try {
+                const saved = await api.loadAutosave();
+                if (saved && Array.isArray(saved.data) && saved.data.length > 0) {
+                    setAutosaveOffer(saved);
+                }
+            } catch (e) { /* no autosave */ }
+        })();
+
+        // Warnings the operator must see in this mode too: a failing crash-
+        // recovery log and unverified unit guesses. Pull any that fired before
+        // this view mounted, then listen live.
+        const api = getElectronAPI();
+        if (api.getPendingNotices) {
+            api.getPendingNotices().then(n => {
+                if (n?.safetyLogError) setSafetyLogError(n.safetyLogError);
+                if (Array.isArray(n?.unitNotices) && n.unitNotices.length > 0) setUnitNotices(n.unitNotices);
+            }).catch(() => { });
+        }
+        const removeSafetyLogListener = api.onSafetyLogError
+            ? api.onSafetyLogError((info) => setSafetyLogError(info))
+            : null;
+        const removeUnitListener = api.onUnitAutodetected
+            ? api.onUnitAutodetected((info) =>
+                setUnitNotices(prev => [...prev.filter(n => n.tag !== info.tag), info]))
+            : null;
+        return () => {
+            if (removeSafetyLogListener) removeSafetyLogListener();
+            if (removeUnitListener) removeUnitListener();
+        };
     }, []);
 
     const loadSessionList = async () => {
@@ -410,12 +469,19 @@ function CustomerView({ onGoHome }) {
             devicesRef.current = { ...devicesRef.current, [packet.tag]: packet };
             setDevices({ ...devicesRef.current });
 
-            // Feature #3: Track last packet time
-            setLastPacketTimes(prev => ({ ...prev, [packet.tag]: packet.timestamp }));
+            // Feature #3: Track last packet time. Watchdog heartbeats are
+            // synthetic repeats of the last real reading — don't let them
+            // refresh the signal indicator, or a radio dropout stays invisible.
+            if (!packet.synthetic) {
+                setLastPacketTimes(prev => ({ ...prev, [packet.tag]: packet.timestamp }));
+            }
 
-            // Feature #1: Overload alarm check
+            // Feature #1: Overload alarm check. Keep the Set identity stable
+            // while membership is unchanged — a fresh Set per packet re-fired
+            // the companion overload broadcast (and phone vibration) per sample.
             if (wllThresholdRef.current > 0 && Math.abs(packet.value) > wllThresholdRef.current) {
                 setOverloadTags(prev => {
+                    if (prev.has(packet.tag)) return prev;
                     const next = new Set(prev);
                     next.add(packet.tag);
                     return next;
@@ -434,9 +500,10 @@ function CustomerView({ onGoHome }) {
 
             const activeTags = selectedTagsRef.current.slice(0, cellCountRef.current);
             if (isLoggingRef.current && activeTags.includes(packet.tag)) {
-                // Feature #8: Peak hold tracking
+                // Feature #8: Peak hold tracking (skip synthetic heartbeats —
+                // they repeat the last real value, never a new measurement)
                 const currentPeak = peakValuesRef.current[packet.tag] || 0;
-                if (Math.abs(packet.value) > Math.abs(currentPeak)) {
+                if (!packet.synthetic && Math.abs(packet.value) > Math.abs(currentPeak)) {
                     peakValuesRef.current[packet.tag] = packet.value;
                     setPeakValues({ ...peakValuesRef.current });
                 }
@@ -511,9 +578,14 @@ function CustomerView({ onGoHome }) {
         setLoggedData([]);
         setIsLogging(true);
         setSavedMessage('');
+        // A pending restore offer is now stale: its on-disk file gets archived
+        // by startSafetyLog below. Leaving the banner up would let the operator
+        // later "Restore" old crash data OVER the recording they just made.
+        setAutosaveOffer(null);
         // Feature #8: Reset peak hold
         peakValuesRef.current = {};
         setPeakValues({});
+        customerRecordingGeneration += 1;
         if (getElectronAPI().startSafetyLog) getElectronAPI().startSafetyLog(logInterval);
 
         // Feature #2: Start auto-save timer (every 60 seconds)
@@ -523,13 +595,55 @@ function CustomerView({ onGoHome }) {
         }, 60000);
     };
 
-    const stopLogging = () => {
+    const stopLogging = async () => {
+        // The recording session this stop belongs to: if the operator starts
+        // the next recording while the flush below is awaiting, this stale
+        // continuation must not stop the NEW recording's safety log.
+        const myGen = customerRecordingGeneration;
         setIsLogging(false);
-        if (getElectronAPI().stopSafetyLog) getElectronAPI().stopSafetyLog();
-        // Stop auto-save
+        // Stop the auto-save timer first so a 60s tick can't race the final flush
         if (autosaveTimerRef.current) {
             clearInterval(autosaveTimerRef.current);
             autosaveTimerRef.current = null;
+        }
+        // Durably flush the FULL recording to disk BEFORE stopping the safety
+        // log. Without this, a stopped recording lived only in renderer memory
+        // until the user clicked Save — the exact failure mode of the Aug 6
+        // data-loss incident (the service-mode stopTest got this fix; this path
+        // didn't). The flush lands in _autosave.json, which is offered for
+        // recovery on relaunch and archived (not overwritten) by new recordings.
+        const api = getElectronAPI();
+        const data = loggedDataRef.current;
+        let flushed = false;
+        if (api.autosaveSession && data.length > 0) {
+            try {
+                const name = sessionName || `Session ${new Date().toLocaleString()}`;
+                const result = await api.autosaveSession({
+                    name,
+                    data,
+                    meta: {
+                        cellCount,
+                        tags: selectedTagsRef.current.slice(0, cellCountRef.current).filter(Boolean),
+                        peakValues: { ...peakValuesRef.current },
+                        stoppedAt: new Date().toISOString()
+                    }
+                });
+                flushed = !!result?.success;
+            } catch (e) { flushed = false; }
+        }
+        // Skip if a newer recording started during the flush — its safety log
+        // is not ours to stop.
+        if (customerRecordingGeneration === myGen) {
+            if (api.stopSafetyLog) api.stopSafetyLog();
+        }
+        // The failed-flush warning is about the OLD recording's data, so it
+        // must fire regardless of whether a new recording has since started
+        // (in that case the old data survives only in an archived safety log).
+        if (!flushed && data.length > 0) {
+            setSavedMessage(customerRecordingGeneration === myGen
+                ? '⚠️ Backup-on-stop failed — this recording exists only in this window. Use "Save to History" NOW.'
+                : '⚠️ Backup of the PREVIOUS recording failed — its only copy is an archived safety log (safety-log-*.jsonl.bak in the OSCAR app-data folder).');
+            setTimeout(() => setSavedMessage(''), 12000);
         }
     };
 
@@ -538,23 +652,31 @@ function CustomerView({ onGoHome }) {
         if (!isLoggingRef.current) return;
         const api = getElectronAPI();
         if (!api.autosaveSession) return;
-        // Use a ref callback to get latest data
-        setLoggedData(current => {
-            if (current.length > 0) {
-                const name = sessionName || `autosave-${new Date().toISOString().slice(0, 10)}`;
-                api.autosaveSession({
-                    name,
-                    data: current,
-                    meta: {
-                        cellCount,
-                        tags: selectedTagsRef.current.slice(0, cellCountRef.current).filter(Boolean),
-                        peakValues: { ...peakValuesRef.current }
-                    }
-                });
+        const current = loggedDataRef.current;
+        if (current.length === 0) return;
+        const name = sessionName || `autosave-${new Date().toISOString().slice(0, 10)}`;
+        try {
+            const result = await api.autosaveSession({
+                name,
+                data: current,
+                meta: {
+                    cellCount,
+                    tags: selectedTagsRef.current.slice(0, cellCountRef.current).filter(Boolean),
+                    peakValues: { ...peakValuesRef.current }
+                }
+            });
+            // Only advertise "✓ Auto-saved" when the write actually succeeded —
+            // a lying indicator is worse than none during an 80-minute session.
+            if (result?.success) {
                 setLastAutosave(new Date());
+            } else {
+                setSavedMessage('⚠️ Auto-save is FAILING (disk full or locked?). Data is only in memory — save to history soon.');
+                setTimeout(() => setSavedMessage(''), 8000);
             }
-            return current; // Don't modify the data
-        });
+        } catch (e) {
+            setSavedMessage('⚠️ Auto-save is FAILING (disk full or locked?). Data is only in memory — save to history soon.');
+            setTimeout(() => setSavedMessage(''), 8000);
+        }
     }, [sessionName, cellCount]);
 
     // Feature #5: Save session to history
@@ -596,6 +718,15 @@ function CustomerView({ onGoHome }) {
                 peakValuesRef.current = session.meta.peakValues;
                 setPeakValues(session.meta.peakValues);
             }
+            // Restore the session's cell assignment (saved in meta but never
+            // read back before) so exports and the peak grid work even when
+            // the cells aren't currently transmitting.
+            if (!isLogging && Array.isArray(session.meta?.tags) && session.meta.tags.length > 0) {
+                const restored = Array(10).fill(null);
+                session.meta.tags.slice(0, 10).forEach((t, i) => { restored[i] = t; });
+                setSelectedTags(restored);
+                setCellCount(session.meta.cellCount || session.meta.tags.length);
+            }
             setShowHistory(false);
             setSavedMessage(`Loaded: ${session.name}`);
             setTimeout(() => setSavedMessage(''), 4000);
@@ -623,14 +754,23 @@ function CustomerView({ onGoHome }) {
     const exportCustomerPackage = async () => {
         if (loggedData.length === 0) return;
         const name = sessionName || `Load-Test-${new Date().toISOString().slice(0, 10)}`;
-        // Build CSV string
-        const activeTags = selectedTags.slice(0, cellCount).filter(Boolean);
-        const headers = ['Timestamp', 'Elapsed (s)', ...activeTags.map(t => `Cell ${t} (lbs)`)];
+        // Build CSV string. Each logged row holds ONE cell's reading keyed as
+        // row.Tag / row.value — there is no property keyed by the tag hex, so the
+        // old `row[t]` lookup emitted every load column empty (a customer
+        // deliverable with zero measurement data). Emit the reading in its own
+        // cell's column and include the Total Load column.
+        // Columns come from the DATA, not the live cell assignment — a session
+        // restored at the office (cells powered off) has empty selectedTags.
+        const dataTags = [...new Set(loggedData.map(r => r.Tag || r.tag).filter(Boolean))];
+        const activeTags = dataTags.length > 0 ? dataTags : selectedTags.slice(0, cellCount).filter(Boolean);
+        const headers = ['Timestamp', 'Elapsed (s)', ...activeTags.map(t => `Cell ${t} (lbs)`), 'Total Load (lbs)'];
         const firstTs = loggedData[0]?.timestamp || 0;
         const rows = loggedData.map(row => {
             const elapsed = ((row.timestamp - firstTs) / 1000).toFixed(1);
-            const vals = activeTags.map(t => (row[t] !== undefined ? row[t].toFixed(2) : ''));
-            return [new Date(row.timestamp).toISOString(), elapsed, ...vals].join(',');
+            const rowTag = row.Tag || row.tag;
+            const vals = activeTags.map(t => (rowTag === t && typeof row.value === 'number' ? row.value.toFixed(2) : ''));
+            const total = typeof row['Total Load'] === 'number' ? row['Total Load'].toFixed(2) : '';
+            return [new Date(row.timestamp).toISOString(), elapsed, ...vals, total].join(',');
         });
         const csvData = [headers.join(','), ...rows].join('\n');
 
@@ -687,7 +827,16 @@ function CustomerView({ onGoHome }) {
         setSelectedTags(newTags);
     };
 
-    const handleZero = (tag) => { if (tag) getElectronAPI().tare(tag); };
+    const handleZero = async (tag) => {
+        if (!tag) return;
+        const result = await getElectronAPI().tare(tag);
+        // A silent no-op here once meant a whole test recorded the rigging dead
+        // weight — if the cell hasn't reported yet, say so.
+        if (result && result.success === false) {
+            setSavedMessage(`⚠️ Zero NOT applied for ${tag}: no reading received yet. Wait for a live value, then Zero again.`);
+            setTimeout(() => setSavedMessage(''), 6000);
+        }
+    };
     const handleWakeSensors = async () => { if (getElectronAPI().wakeSensors) await getElectronAPI().wakeSensors(); };
     const toggleKeepAwake = async () => { const ns = !keepAwake; setKeepAwake(ns); await getElectronAPI().toggleKeepAwake(ns); };
 
@@ -751,10 +900,14 @@ function CustomerView({ onGoHome }) {
         return () => { if (companionPollRef.current) clearInterval(companionPollRef.current); };
     }, [companionRunning]);
 
-    // Sync session state to companion server whenever key state changes
+    // Sync session state to companion server whenever key state changes.
+    // NOTE: the preload API is companionUpdateState — this previously called a
+    // nonexistent companionSyncState behind an existence guard, so the sync
+    // silently never ran and phones showed 0.0 lbs / "Not Recording" during
+    // live lifts started from Customer mode.
     useEffect(() => {
-        if (companionRunning && getElectronAPI().companionSyncState) {
-            getElectronAPI().companionSyncState({
+        if (companionRunning && getElectronAPI().companionUpdateState) {
+            getElectronAPI().companionUpdateState({
                 selectedTags,
                 cellCount,
                 isLogging,
@@ -763,6 +916,14 @@ function CustomerView({ onGoHome }) {
             });
         }
     }, [companionRunning, selectedTags, cellCount, isLogging, sessionName, loggedData.length]);
+
+    // Forward overload state to the companion phones (banner + vibration).
+    useEffect(() => {
+        const api = getElectronAPI();
+        if (api.companionUpdateState) {
+            api.companionUpdateState({ overloadTags: [...overloadTags], wllThreshold });
+        }
+    }, [overloadTags, wllThreshold, companionRunning]);
 
     // Listen for photos from companion
     useEffect(() => {
@@ -1040,6 +1201,51 @@ function CustomerView({ onGoHome }) {
 
                 {savedMessage && <div className="customer-save-toast">{savedMessage}</div>}
 
+                {safetyLogError && (
+                    <div style={{ background: 'rgba(248,113,113,0.15)', border: '1px solid #f87171', borderRadius: 8, padding: '8px 16px', margin: '10px 0', display: 'flex', alignItems: 'center', gap: 10, fontSize: '0.82rem', fontWeight: 600, color: '#f87171', flexWrap: 'wrap' }}>
+                        ⚠️ CRASH-RECOVERY LOG IS FAILING TO WRITE ({safetyLogError.message}). Recording continues, but a crash could lose data — free disk space or restart soon.
+                        <button onClick={() => { setSafetyLogError(null); getElectronAPI().dismissNotices?.({ safetyLog: true }); }} style={{ background: 'none', border: '1px solid currentColor', borderRadius: 4, color: 'inherit', cursor: 'pointer', fontSize: '0.7rem', padding: '1px 7px' }}>Dismiss</button>
+                    </div>
+                )}
+                {unitNotices.length > 0 && (
+                    <div style={{ background: 'rgba(250,204,21,0.12)', border: '1px solid #facc15', borderRadius: 8, padding: '8px 16px', margin: '10px 0', display: 'flex', alignItems: 'center', gap: 10, fontSize: '0.82rem', fontWeight: 600, color: '#eab308', flexWrap: 'wrap' }}>
+                        ⚠️ {unitNotices.map(n => `Cell ${n.tag}: units auto-detected as ${n.unit}`).join(' · ')} — verify the reading against a known load before recording.
+                        <button onClick={() => { setUnitNotices([]); getElectronAPI().dismissNotices?.({ units: true }); }} style={{ background: 'none', border: '1px solid currentColor', borderRadius: 4, color: 'inherit', cursor: 'pointer', fontSize: '0.7rem', padding: '1px 7px' }}>Dismiss</button>
+                    </div>
+                )}
+
+                {/* Unsaved-recording restore offer (crash recovery) */}
+                {autosaveOffer && !isLogging && (
+                    <div style={{ background: 'rgba(250,204,21,0.12)', border: '1px solid var(--yellow-accent, #facc15)', borderRadius: 8, padding: '10px 16px', margin: '10px 0', display: 'flex', alignItems: 'center', gap: 12, fontSize: '0.85rem', flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 700 }}>
+                            ⚠️ Unsaved recording found: “{autosaveOffer.name || 'Unnamed session'}” — {autosaveOffer.data.length.toLocaleString()} samples{autosaveOffer.savedAt ? `, last saved ${new Date(autosaveOffer.savedAt).toLocaleString()}` : ''}
+                        </span>
+                        <button className="action-btn" style={{ fontSize: '0.78rem', padding: '4px 12px' }} onClick={() => {
+                            setLoggedData(autosaveOffer.data);
+                            setSessionName(autosaveOffer.name || '');
+                            if (autosaveOffer.meta?.peakValues) {
+                                peakValuesRef.current = autosaveOffer.meta.peakValues;
+                                setPeakValues(autosaveOffer.meta.peakValues);
+                            }
+                            // Restore the cell assignment too — the CSV export
+                            // and peak grid key off selectedTags, which are
+                            // empty when the cells aren't currently powered.
+                            if (Array.isArray(autosaveOffer.meta?.tags) && autosaveOffer.meta.tags.length > 0) {
+                                const restored = Array(10).fill(null);
+                                autosaveOffer.meta.tags.slice(0, 10).forEach((t, i) => { restored[i] = t; });
+                                setSelectedTags(restored);
+                                setCellCount(autosaveOffer.meta.cellCount || autosaveOffer.meta.tags.length);
+                            }
+                            setAutosaveOffer(null);
+                            setSavedMessage('Recording restored — use "Save to History" to keep it permanently.');
+                            setTimeout(() => setSavedMessage(''), 8000);
+                        }}>Restore</button>
+                        <button className="action-btn secondary" style={{ fontSize: '0.78rem', padding: '4px 12px' }} onClick={() => setAutosaveOffer(null)}>
+                            Not now
+                        </button>
+                    </div>
+                )}
+
                 {/* Feature #1: Overload banner */}
                 {overloadTags.size > 0 && (
                     <div className="overload-banner">
@@ -1177,11 +1383,19 @@ function CustomerView({ onGoHome }) {
                             <button onClick={startLogging} className="action-btn large record-btn">
                                 <span className="dot"></span> Start Recording
                             </button>
-                            <button onClick={() => {
+                            <button onClick={async () => {
                                 const activeTags = selectedTags.slice(0, cellCount).filter(t => t);
-                                activeTags.forEach(tag => getElectronAPI().tare(tag));
-                                setSavedMessage('All cells zeroed!');
-                                setTimeout(() => setSavedMessage(''), 3000);
+                                const results = await Promise.all(activeTags.map(tag =>
+                                    getElectronAPI().tare(tag).then(r => ({ tag, ok: r?.success !== false }))
+                                ));
+                                const failed = results.filter(r => !r.ok).map(r => r.tag);
+                                if (failed.length === 0) {
+                                    setSavedMessage('All cells zeroed!');
+                                    setTimeout(() => setSavedMessage(''), 3000);
+                                } else {
+                                    setSavedMessage(`⚠️ Zero NOT applied for ${failed.join(', ')} — no reading received yet. Wait for live values, then Zero again.`);
+                                    setTimeout(() => setSavedMessage(''), 6000);
+                                }
                             }} className="action-btn secondary large ml-4">
                                 Zero All
                             </button>

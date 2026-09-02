@@ -115,6 +115,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
     // Refs for IPC listener access
     const [saveStatus, setSaveStatus] = useState('synced'); // 'synced' | 'saving' | 'error'
+    const [safetyLogError, setSafetyLogError] = useState(null); // crash-recovery log failing to write
+    const [unitNotices, setUnitNotices] = useState([]); // auto-detected unit guesses awaiting operator sanity-check
     const devicesRef = useRef({});
     const logIntervalRef = useRef(logInterval);
     const dualModeRef = useRef(dualMode);
@@ -126,6 +128,17 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const cellCountBRef = useRef(cellCountB);
     const isLoggingBRef = useRef(isLoggingB);
     const lastLoggedTimesBRef = useRef({}); // tag -> time (Test B)
+
+    // First-sample timestamps of the active recordings, for marker elapsed
+    // times (read inside the companion-marker listener without stale closures)
+    const loggedDataFirstTsRef = useRef(null);
+    useEffect(() => {
+        loggedDataFirstTsRef.current = loggedData.length > 0 ? loggedData[0].timestamp : null;
+    }, [loggedData]);
+    const loggedDataBFirstTsRef = useRef(null);
+    useEffect(() => {
+        loggedDataBFirstTsRef.current = loggedDataB.length > 0 ? loggedDataB[0].timestamp : null;
+    }, [loggedDataB]);
 
     useEffect(() => { logIntervalRef.current = logInterval; }, [logInterval]);
     useEffect(() => { dualModeRef.current = dualMode; }, [dualMode]);
@@ -274,6 +287,31 @@ function ServiceView({ onGoHome, onOpenSettings }) {
             }
         };
         checkRecovery();
+
+        // The crash-recovery safety log failing to write must be visible: a dead
+        // net looks identical to a healthy one until the day it's needed.
+        // Seed from notices that fired before this view mounted (auto-detect at
+        // launch, failures during another mode), then listen live.
+        if (getElectronAPI().getPendingNotices) {
+            getElectronAPI().getPendingNotices().then(n => {
+                if (n?.safetyLogError) setSafetyLogError(n.safetyLogError);
+                if (Array.isArray(n?.unitNotices) && n.unitNotices.length > 0) setUnitNotices(n.unitNotices);
+            }).catch(() => { });
+        }
+        const removeSafetyLogListener = getElectronAPI().onSafetyLogError
+            ? getElectronAPI().onSafetyLogError((info) => setSafetyLogError(info))
+            : null;
+        // A new cell's unit was guessed from signal magnitude — the operator must
+        // sanity-check the reading against a known load before trusting it.
+        const removeUnitListener = getElectronAPI().onUnitAutodetected
+            ? getElectronAPI().onUnitAutodetected((info) =>
+                setUnitNotices(prev => [...prev.filter(n => n.tag !== info.tag), info]))
+            : null;
+
+        return () => {
+            if (removeSafetyLogListener) removeSafetyLogListener();
+            if (removeUnitListener) removeUnitListener();
+        };
     }, []);
 
     // --- CENTRAL PERSISTENCE ENGINE ---
@@ -398,19 +436,29 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
     // Auto-advance: when all recording has stopped with data → Review & Finalize.
     // In dual mode this waits until both Test A and Test B have stopped.
+    // ONLY when a SharePoint job is selected: without one, stopTest shows the
+    // job-number prompt inside LiveView, and switching tabs here would unmount
+    // LiveView and destroy that prompt — orphaning the recording. The manual
+    // path advances via handleDataImported once the prompt's save completes.
     const anyLogging = isLogging || isLoggingB;
     const prevLoggingRef = useRef(anyLogging);
     useEffect(() => {
         const wasLogging = prevLoggingRef.current;
         prevLoggingRef.current = anyLogging;
-        if (wasLogging && !anyLogging && activeJob?.dataSets?.length > 0) {
+        if (wasLogging && !anyLogging && selectedSharePointJob?.QuoteNum && activeJob?.dataSets?.length > 0) {
             setActiveTab('report');
         }
-    }, [anyLogging]);
+    }, [anyLogging, selectedSharePointJob]);
 
     const handleRecover = async () => {
         if (getElectronAPI().loadRecovery) {
             const data = await getElectronAPI().loadRecovery();
+            if (!data || data.length === 0) {
+                // Do NOT consume the one-shot recovery offer on a failed read —
+                // tell the operator where the raw files are and keep the prompt.
+                alert('Recovery could not read any samples back.\n\nThe recovery files were left untouched for manual inspection:\n• safety-log.jsonl and sessions\\_autosave.json in the OSCAR app-data folder\n\nYou can retry, or choose Discard to archive them.');
+                return;
+            }
             setRecoverySession(data);
             setActiveTab('live');
         }
@@ -420,7 +468,7 @@ function ServiceView({ onGoHome, onOpenSettings }) {
     const handleDiscardRecovery = async () => {
         if (!window.confirm('Discard the recovered test session?\n\nThe data will be archived on disk (not deleted), but OSCAR will no longer offer to restore it.')) return;
         if (getElectronAPI().clearRecovery) {
-            await getElectronAPI().clearRecovery();
+            await getElectronAPI().clearRecovery({ discard: true });
         }
         setShowRecoveryPrompt(false);
     };
@@ -439,14 +487,54 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         return { ...job, dataSets };
     }, [allJobs, activeJobId]);
 
+    // Keep the SharePoint selection in step with a target job. A stale
+    // selection makes LiveView's stopTest save the next recording (and name
+    // its CSV) under the PREVIOUS job's QuoteNum — certified under the wrong
+    // job. Rules:
+    //  - NEVER while recording: the in-flight recording belongs to the job it
+    //    was started under; browsing other jobs mid-test must not re-target it.
+    //  - Synthesizing a selection (silent, prompt-less saves) only happens for
+    //    EXPLICIT navigation (handleJobChange). The pending-job resolution
+    //    after a save/import only clears a mismatched stale selection, so the
+    //    manual workflow keeps its job-number prompt on every stop.
+    //  - Placeholder "numbers" (e.g. 'Migrated Test') never become QuoteNums.
+    const syncSharePointToJob = (job, { allowSynthesize = true } = {}) => {
+        if (isLoggingRef.current || isLoggingBRef.current) return;
+        const targetNum = job?.metadata?.jobNumber || null;
+        if ((selectedSharePointJob?.QuoteNum || null) === targetNum) return;
+        const plausibleNumber = !!targetNum && /^\S+$/.test(targetNum);
+        if (allowSynthesize && plausibleNumber) {
+            setSelectedSharePointJob({
+                QuoteNum: targetNum,
+                JobName: job?.metadata?.jobName,
+                Customer: job?.metadata?.customer,
+                LeadCompany: job?.metadata?.leadCompany,
+                PODate: job?.metadata?.poDate,
+                PONumber: job?.metadata?.poNumber,
+            });
+        } else {
+            // Clear the stale selection so stopTest asks for a job number
+            // instead of silently saving under the old job.
+            setSelectedSharePointJob(null);
+        }
+    };
+
+    // After a functional jobs update, the new/updated job's id isn't knowable at
+    // call time — resolve the active-job selection once the update has landed.
+    const pendingActiveJobNumberRef = useRef(null);
+    useEffect(() => {
+        if (pendingActiveJobNumberRef.current === null) return;
+        const target = allJobs.find(j => j.metadata?.jobNumber === pendingActiveJobNumberRef.current);
+        if (target) {
+            setActiveJobId(target.id);
+            syncSharePointToJob(target, { allowSynthesize: false });
+            pendingActiveJobNumberRef.current = null;
+        }
+    }, [allJobs]);
+
     const handleDataImported = (data, jobNumber, extraMetadata = {}) => {
         // Markers belong to this specific recording (dataSet), not the whole job.
         const { markers: importMarkers, ...restMetadata } = extraMetadata;
-        // Check if we should append to an existing job
-        const existingJobIndex = allJobs.findIndex(j => j.metadata?.jobNumber === jobNumber);
-
-        let updatedJobs;
-        let finalJobId;
 
         // Auto-detect input time unit from column headers
         const headers = data.length > 0 ? Object.keys(data[0]) : [];
@@ -456,36 +544,45 @@ function ServiceView({ onGoHome, onOpenSettings }) {
         else if (/min/i.test(timeHeader)) detectedTimeUnit = 'min';
         else if (/hour|hr/i.test(timeHeader)) detectedTimeUnit = 'hrs';
 
-        if (existingJobIndex !== -1) {
-            // Append new data set to existing job
-            const existingJob = allJobs[existingJobIndex];
-            const existingDataSets = existingJob.dataSets || (existingJob.data ? [{
-                data: existingJob.data,
-                name: 'Data Set 1',
-                inputTimeUnit: detectedTimeUnit,
-                timestamp: existingJob.id
-            }] : []);
+        // Functional update: two saves landing close together (dual-mode Test A
+        // then Test B, while A's session file is still flushing) must each see
+        // the other's result — a stale `allJobs` closure here silently dropped
+        // the first test's dataset from the job.
+        pendingActiveJobNumberRef.current = jobNumber;
+        setAllJobs(prevJobs => {
+            const existingJobIndex = prevJobs.findIndex(j => j.metadata?.jobNumber === jobNumber);
 
-            const newDataSet = {
-                data: data,
-                name: restMetadata.fileName || `Data Set ${existingDataSets.length + 1}`,
-                inputTimeUnit: detectedTimeUnit,
-                timestamp: Date.now(),
-                ...(importMarkers && importMarkers.length ? { markers: importMarkers } : {})
-            };
+            if (existingJobIndex !== -1) {
+                // Append new data set to existing job
+                const existingJob = prevJobs[existingJobIndex];
+                const existingDataSets = existingJob.dataSets || (existingJob.data ? [{
+                    data: existingJob.data,
+                    name: 'Data Set 1',
+                    inputTimeUnit: detectedTimeUnit,
+                    timestamp: existingJob.id
+                }] : []);
 
-            const updatedJob = {
-                ...existingJob,
-                dataSets: [...existingDataSets, newDataSet],
-                metadata: { ...existingJob.metadata, ...restMetadata }
-            };
-            // Clean up legacy single data field
-            delete updatedJob.data;
+                const newDataSet = {
+                    data: data,
+                    name: restMetadata.fileName || `Data Set ${existingDataSets.length + 1}`,
+                    inputTimeUnit: detectedTimeUnit,
+                    timestamp: Date.now(),
+                    ...(importMarkers && importMarkers.length ? { markers: importMarkers } : {})
+                };
 
-            updatedJobs = [...allJobs];
-            updatedJobs[existingJobIndex] = updatedJob;
-            finalJobId = updatedJob.id;
-        } else {
+                const updatedJob = {
+                    ...existingJob,
+                    dataSets: [...existingDataSets, newDataSet],
+                    metadata: { ...existingJob.metadata, ...restMetadata }
+                };
+                // Clean up legacy single data field
+                delete updatedJob.data;
+
+                const updatedJobs = [...prevJobs];
+                updatedJobs[existingJobIndex] = updatedJob;
+                return updatedJobs;
+            }
+
             // Create new job
             const newJob = {
                 id: Date.now(),
@@ -498,12 +595,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                 }],
                 metadata: { jobNumber, ...restMetadata }
             };
-            updatedJobs = [newJob, ...allJobs];
-            finalJobId = newJob.id;
-        }
-
-        setAllJobs(updatedJobs);
-        setActiveJobId(finalJobId);
+            return [newJob, ...prevJobs];
+        });
 
         // Note: the crash-recovery log is NOT cleared here. LiveView retires it
         // itself once the recording has a verified durable copy — and a CSV
@@ -580,22 +673,38 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
     useEffect(() => {
         const removeListener = getElectronAPI().onCompanionMarkerToggle?.((phase) => {
-            if (!isLogging) return;
-            const firstTimestamp = loggedData.length > 0 ? loggedData[0].timestamp : Date.now();
+            // Route the marker to whichever test is recording (Test A wins when
+            // both are). Previously a Test-B-only recording silently dropped
+            // every phone marker while the phone showed success.
+            const useTestA = isLoggingRef.current;
+            if (!useTestA && !isLoggingBRef.current) return;
+            const setTargetMarkers = useTestA ? setMarkers : setMarkersB;
+            const firstTsRef = useTestA ? loggedDataFirstTsRef : loggedDataBFirstTsRef;
             const phaseLabel = phase === 'function' ? 'Function Test' : 'Static Hold';
-            const phaseMarkers = markers.filter(m => m.phase === phase);
-            const isOpen = phaseMarkers.length > 0 && phaseMarkers[phaseMarkers.length - 1].edge === 'start';
-            const edge = isOpen ? 'end' : 'start';
-            setMarkers(prev => [...prev, {
-                phase,
-                edge,
-                label: `${phaseLabel} ${edge === 'start' ? 'Start' : 'End'}`,
-                elapsedMs: Date.now() - firstTimestamp,
-                timestamp: Date.now()
-            }]);
+            // Compute the edge INSIDE the functional update: two toggles arriving
+            // before React re-registers this listener used to read the same stale
+            // `markers` closure and both append the same edge, unbalancing the
+            // phase pairing on the certificate. Also drop a same-phase repeat
+            // within 1s — a phone double-tap on the feedback-less button.
+            setTargetMarkers(prev => {
+                const now = Date.now();
+                const phaseMarkers = prev.filter(m => m.phase === phase);
+                const last = phaseMarkers[phaseMarkers.length - 1];
+                if (last && now - last.timestamp < 1000) return prev; // double-tap guard
+                const isOpen = !!last && last.edge === 'start';
+                const edge = isOpen ? 'end' : 'start';
+                const firstTimestamp = firstTsRef.current || now;
+                return [...prev, {
+                    phase,
+                    edge,
+                    label: `${phaseLabel} ${edge === 'start' ? 'Start' : 'End'}`,
+                    elapsedMs: now - firstTimestamp,
+                    timestamp: now
+                }];
+            });
         });
         return () => { if (typeof removeListener === 'function') removeListener(); };
-    }, [isLogging, loggedData, markers]);
+    }, []);
 
     // Hydrate leaks from disk on mount and whenever companion server toggles
     useEffect(() => {
@@ -637,6 +746,8 @@ function ServiceView({ onGoHome, onOpenSettings }) {
 
     const handleJobChange = (id) => {
         setActiveJobId(id);
+        const target = allJobs.find(j => j.id?.toString() === id?.toString());
+        syncSharePointToJob(target);
         getElectronAPI().saveData({
             jobs: allJobs,
             lastActiveJobId: id
@@ -840,6 +951,18 @@ function ServiceView({ onGoHome, onOpenSettings }) {
                     ) : (
                         <>Recording{loggedData.length > 0 ? ` — ${loggedData.length} samples` : ''}</>
                     )}
+                </div>
+            )}
+            {!isCertPreview && safetyLogError && (
+                <div className="no-print" style={{ background: 'rgba(248,113,113,0.15)', borderBottom: '1px solid var(--red, #f87171)', padding: '6px 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--red, #f87171)' }}>
+                    ⚠️ CRASH-RECOVERY LOG IS FAILING TO WRITE ({safetyLogError.message}). Recording continues, but a crash could lose data — free disk space or restart soon, and Stop &amp; Save as early as practical.
+                    <button onClick={() => { setSafetyLogError(null); getElectronAPI().dismissNotices?.({ safetyLog: true }); }} style={{ background: 'none', border: '1px solid currentColor', borderRadius: 4, color: 'inherit', cursor: 'pointer', fontSize: '0.7rem', padding: '1px 7px' }}>Dismiss</button>
+                </div>
+            )}
+            {!isCertPreview && unitNotices.length > 0 && (
+                <div className="no-print" style={{ background: 'rgba(250,204,21,0.12)', borderBottom: '1px solid var(--yellow-accent, #facc15)', padding: '6px 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', fontSize: '0.8rem', fontWeight: 600, color: 'var(--yellow-accent, #facc15)' }}>
+                    ⚠️ {unitNotices.map(n => `Cell ${n.tag}: units auto-detected as ${n.unit}`).join(' · ')} — verify the reading against a known load before recording. If it's off by ~2,200x, the unit guess is wrong (fix in calibration.json).
+                    <button onClick={() => { setUnitNotices([]); getElectronAPI().dismissNotices?.({ units: true }); }} style={{ background: 'none', border: '1px solid currentColor', borderRadius: 4, color: 'inherit', cursor: 'pointer', fontSize: '0.7rem', padding: '1px 7px' }}>Dismiss</button>
                 </div>
             )}
             <main className="app-content">

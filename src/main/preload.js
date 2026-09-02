@@ -47,7 +47,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getDeviceStatus: () => ipcRenderer.invoke('t24:getStatus'),
     checkRecovery: () => ipcRenderer.invoke('t24:checkRecovery'),
     loadRecovery: () => ipcRenderer.invoke('t24:loadRecovery'),
-    clearRecovery: () => ipcRenderer.invoke('t24:clearRecovery'),
+    clearRecovery: (opts) => ipcRenderer.invoke('t24:clearRecovery', opts),
+    onSafetyLogError: (callback) => {
+        const handler = (_event, value) => callback(value);
+        ipcRenderer.on('safety-log-error', handler);
+        return () => ipcRenderer.removeListener('safety-log-error', handler);
+    },
+    onUnitAutodetected: (callback) => {
+        const handler = (_event, value) => callback(value);
+        ipcRenderer.on('unit-autodetected', handler);
+        return () => ipcRenderer.removeListener('unit-autodetected', handler);
+    },
+    getPendingNotices: () => ipcRenderer.invoke('t24:getPendingNotices'),
+    dismissNotices: (opts) => ipcRenderer.invoke('t24:dismissNotices', opts),
     startSafetyLog: (intervalMs, preserve) => ipcRenderer.send('t24:startSafetyLog', intervalMs, preserve),
     stopSafetyLog: () => ipcRenderer.send('t24:stopSafetyLog'),
     wakeSensors: () => ipcRenderer.invoke('t24:wakeSensors'),

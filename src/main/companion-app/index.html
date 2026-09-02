@@ -467,7 +467,12 @@
             switch (msg.type) {
                 case 'liveData':
                     state.devices[msg.data.tag] = msg.data;
-                    lastPacketTimes[msg.data.tag] = Date.now();
+                    // Watchdog heartbeats are synthetic repeats of the last real
+                    // reading — don't let them refresh the signal dot, or a radio
+                    // dropout stays green on the phones the crew is watching.
+                    if (!msg.data.synthetic) {
+                        lastPacketTimes[msg.data.tag] = Date.now();
+                    }
                     pushChartPoint(msg.data.tag, msg.data.value);
                     recalcTotal();
                     if (!state.leakDraft) render();
@@ -626,15 +631,23 @@
                 const reader = new FileReader();
                 reader.onload = (ev) => {
                     const dataUrl = ev.target.result;
-                    // Send to OSCAR
+                    // Send to OSCAR. A failed upload (413 for an oversized photo,
+                    // dropped WiFi) must not vanish silently — the crew thinks
+                    // the evidence photo was captured when it wasn't.
                     apiFetch('/api/photo', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ dataUrl, timestamp: Date.now(), gps: state.gps })
-                    }).then(r => r.json()).then(() => {
+                    }).then(r => {
+                        if (!r.ok) throw new Error('HTTP ' + r.status);
+                        return r.json();
+                    }).then(() => {
                         state.photos.push({ dataUrl, timestamp: Date.now(), gps: state.gps });
                         render();
-                    }).catch(() => {});
+                    }).catch((e) => {
+                        alert('Photo NOT sent to OSCAR (' + (e && e.message ? e.message : 'connection failed') + '). ' +
+                              'If this keeps happening the photo may be too large — try again or check WiFi.');
+                    });
                 };
                 reader.readAsDataURL(file);
             };
@@ -1142,11 +1155,23 @@
         window.__submitLeak = submitLeak;
         window.__deleteLeak = deleteLeak;
         window.__toggleMarker = function(phase) {
+            // A lost marker silently changed the certified test phases — never
+            // fail without telling the tech. Also block re-taps until the
+            // round trip finishes (the button state only updates via the
+            // openPhases broadcast, which invites double-taps).
+            if (state.markerPending) return;
+            state.markerPending = true;
             apiFetch('/api/marker', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ phase })
-            }).catch(() => {});
+            }).then(r => {
+                state.markerPending = false;
+                if (!r.ok) alert('Marker NOT recorded (server said no). Check the laptop and try again.');
+            }).catch(() => {
+                state.markerPending = false;
+                alert('Marker NOT recorded — connection to OSCAR failed. Check WiFi and tap again.');
+            });
         };
 
         // ── Init ──

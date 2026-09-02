@@ -220,9 +220,13 @@ function ReportView({ job, displayUnit = 'lbs', displayTimeUnit = 'min', onUnitC
                                                 </tr>
                                             </thead>
                                             <tbody>
+                                                {/* Render by header key, not Object.values: rows are not
+                                                    guaranteed homogeneous (e.g. watchdog-heartbeat rows carry
+                                                    an extra synthetic flag), and positional values shift
+                                                    every column after the mismatch. */}
                                                 {dataSet.data.slice(0, 50).map((row, i) => (
                                                     <tr key={i}>
-                                                        {Object.values(row).map((val, j) => <td key={j}>{val}</td>)}
+                                                        {Object.keys(dataSet.data[0] || {}).map(key => <td key={key}>{String(row[key] ?? '')}</td>)}
                                                     </tr>
                                                 ))}
                                             </tbody>

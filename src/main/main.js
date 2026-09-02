@@ -38,6 +38,78 @@ function archiveSafetyLogFile(logPath) {
     } catch (e) { }
 }
 
+// Crash-safe file write: a plain writeFileSync truncates the target first, so a
+// power loss mid-write destroys the only copy (this is how a 63MB
+// dashboard-data.json gets corrupted). Instead: write to a temp file, fsync it,
+// then atomically rename over the target — the target is always either the old
+// complete file or the new complete file, never a truncated one. Optionally
+// refreshes a rolling `.bak` of the previous good version at most once per
+// backupIntervalMs, as a second line of defense against logically-bad writes.
+function writeFileAtomic(filePath, contents, { backupIntervalMs = 0 } = {}) {
+    const tmpPath = filePath + '.tmp';
+    const fd = fs.openSync(tmpPath, 'w');
+    try {
+        fs.writeFileSync(fd, contents);
+        fs.fsyncSync(fd);
+    } finally {
+        try { fs.closeSync(fd); } catch (e) { }
+    }
+    if (backupIntervalMs > 0 && fs.existsSync(filePath)) {
+        const bakPath = filePath + '.bak';
+        try {
+            const bakAge = fs.existsSync(bakPath) ? Date.now() - fs.statSync(bakPath).mtimeMs : Infinity;
+            if (bakAge >= backupIntervalMs) fs.copyFileSync(filePath, bakPath);
+        } catch (e) { }
+    }
+    // On Windows, renaming over a file an AV scanner / indexer momentarily
+    // holds throws EPERM/EBUSY. Retry briefly instead of failing the save.
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            fs.renameSync(tmpPath, filePath);
+            return;
+        } catch (err) {
+            lastErr = err;
+            if (!['EPERM', 'EBUSY', 'EACCES'].includes(err.code)) break;
+            const until = Date.now() + 60 * (attempt + 1);
+            while (Date.now() < until) { /* bounded blocking wait */ }
+        }
+    }
+    try { fs.unlinkSync(tmpPath); } catch (e) { }
+    throw lastErr;
+}
+
+// Parse a JSONL file tolerantly: a truncated final line (power loss mid-append)
+// must never discard the thousands of good lines before it.
+function parseJsonlLines(content) {
+    return content.split('\n')
+        .map(l => { try { return JSON.parse(l); } catch (e) { return null; } })
+        .filter(e => e && typeof e === 'object');
+}
+
+// The rolling 60s autosave shares the crash-recovery duty with the safety log.
+// A leftover _autosave.json belongs to a session that never saved cleanly, so
+// before anything could overwrite it (a new recording's autosave tick, or a
+// recovery discard) move it to a timestamped archive instead of deleting it.
+function getAutosavePath() {
+    return path.join(app.getPath('userData'), 'sessions', '_autosave.json');
+}
+
+function archiveAutosaveFile() {
+    try {
+        const file = getAutosavePath();
+        if (!fs.existsSync(file)) return;
+        if (fs.statSync(file).size <= 10) { fs.unlinkSync(file); return; }
+        const dir = path.dirname(file);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        fs.renameSync(file, path.join(dir, `_autosave-${stamp}.json.bak`));
+        const archives = fs.readdirSync(dir).filter(f => /^_autosave-.*\.json\.bak$/.test(f)).sort();
+        while (archives.length > 5) {
+            try { fs.unlinkSync(path.join(dir, archives.shift())); } catch (e) { }
+        }
+    } catch (e) { }
+}
+
 class T24Reader {
     constructor() {
         this.device = null;
@@ -59,7 +131,29 @@ class T24Reader {
         this.autoDetectComplete = new Set(); // Tags that have been auto-detected
         // Default calibration to prevent massive readings if file fails to load
         this.calibrationConfig = {};
+        // Operator notices that must not be lost when no window/listener exists
+        // yet (auto-detect can finish before the first view mounts). Views pull
+        // these via t24:getPendingNotices on mount; live events still fire too.
+        this.unitNotices = [];
+        this.lastSafetyLogError = null;
+        // Event-loop heartbeat: lets packet handling distinguish "the radio
+        // went quiet" from "the main process itself stalled on a big
+        // synchronous write" — only the former should reset smoothing buffers
+        // or trigger watchdog heartbeats.
+        this.lastTickAt = Date.now();
+        this.tickTimer = setInterval(() => { this.lastTickAt = Date.now(); }, 1000);
         this.loadCalibration();
+    }
+
+    queueUnitNotice(notice) {
+        this.unitNotices = [...this.unitNotices.filter(n => n.tag !== notice.tag), notice].slice(-10);
+        // try/catch: this can run from the constructor, before the module-level
+        // `let mainWindow` declaration executes (TDZ) or the window exists.
+        try {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('unit-autodetected', notice);
+            }
+        } catch (e) { /* window not created yet — notice stays queued */ }
     }
 
     loadCalibration() {
@@ -69,32 +163,74 @@ class T24Reader {
             const projectRoot = path.resolve(__dirname, '../../');
             const devPath = path.join(projectRoot, 'config/calibration.json');
 
-            let configPath = null;
-
-            // Priority:
-            // 1. User Data (Highest priority, allows user overrides)
-            // 2. Resources folder (Bundled with app)
-            // 3. Dev path (For development)
-            if (fs.existsSync(userDataPath)) {
-                configPath = userDataPath;
-            } else if (resourcesPath && fs.existsSync(resourcesPath)) {
-                configPath = resourcesPath;
+            // Bundled calibration (shipped with the app) is the curated base.
+            let bundledPath = null;
+            if (resourcesPath && fs.existsSync(resourcesPath)) {
+                bundledPath = resourcesPath;
             } else if (fs.existsSync(devPath)) {
-                configPath = devPath;
+                bundledPath = devPath;
             } else {
-                // Last resort: process.cwd()
                 const fallbackPath = path.join(process.cwd(), 'config/calibration.json');
-                if (fs.existsSync(fallbackPath)) configPath = fallbackPath;
+                if (fs.existsSync(fallbackPath)) bundledPath = fallbackPath;
+            }
+            let bundled = {};
+            if (bundledPath) {
+                try { bundled = JSON.parse(fs.readFileSync(bundledPath, 'utf8')); } catch (e) {
+                    console.error('[CALIBRATION] Bundled config unreadable:', e.message);
+                }
             }
 
-            if (configPath) {
-                const raw = fs.readFileSync(configPath, 'utf8');
-                const loaded = JSON.parse(raw);
-                this.calibrationConfig = { ...this.calibrationConfig, ...loaded };
-                console.log(`[CALIBRATION] Loaded config from ${configPath}:`, this.calibrationConfig);
-            } else {
-                console.warn('[CALIBRATION] No calibration config found. Using defaults.');
+            let userCfg = {};
+            if (fs.existsSync(userDataPath)) {
+                userCfg = JSON.parse(fs.readFileSync(userDataPath, 'utf8'));
             }
+
+            // Merge per tag. Old behavior loaded ONLY userData when it existed, so
+            // calibration fixes shipped in a release never reached field machines
+            // (auto-detect creates userData on the first unknown tag). Rules:
+            //  - tag only in one file → use it
+            //  - tag in both, user entry was AUTO-DETECTED (a guess) → the curated
+            //    bundled entry wins and heals the guess. Legacy guesses predate the
+            //    unitAutoDetected flag, but auto-detect only ever wrote the unit/
+            //    endian keys — an entry with nothing else is treated as a guess.
+            //  - tag in both, user entry is hand-edited (has zeroOffset/scaleFactor
+            //    or other keys) → user wins, but log the disagreement loudly
+            // Entries taken from the bundled file are marked fromBundled so
+            // saveCalibration() can keep them OUT of userData — otherwise one
+            // auto-detect save would freeze today's bundled values into userData
+            // and future shipped calibration fixes would never apply again.
+            const GUESS_KEYS = ['skipTonnesConversion', 'useFloatLE', 'unitAutoDetected', 'detectedAt'];
+            const looksAutoDetected = (cfg) =>
+                cfg && typeof cfg === 'object' && Object.keys(cfg).every(k => GUESS_KEYS.includes(k));
+            const merged = {};
+            for (const [tag, cfg] of Object.entries(bundled)) {
+                merged[tag] = { ...cfg, fromBundled: true };
+            }
+            for (const [tag, cfg] of Object.entries(userCfg)) {
+                const differs = tag in bundled && (JSON.stringify({ s: !!cfg?.skipTonnesConversion, e: !!cfg?.useFloatLE })
+                    !== JSON.stringify({ s: !!bundled[tag].skipTonnesConversion, e: !!bundled[tag].useFloatLE }));
+                if (!(tag in bundled)) {
+                    merged[tag] = cfg;
+                } else if (looksAutoDetected(cfg)) {
+                    if (differs) {
+                        console.log(`[CALIBRATION] Tag ${tag}: bundled entry overrides auto-detected guess`, { bundled: bundled[tag], guess: cfg });
+                        this.queueUnitNotice({
+                            tag,
+                            unit: bundled[tag].skipTonnesConversion ? 'raw (lbs)' : 'tonnes → lbs',
+                            label: 'shipped calibration override',
+                            note: 'Shipped calibration replaced this cell\'s previous auto-detected format — verify the reading against a known load.',
+                        });
+                    }
+                } else {
+                    merged[tag] = cfg;
+                    if (differs) {
+                        console.warn(`[CALIBRATION] Tag ${tag}: userData disagrees with bundled config — using userData`, { user: cfg, bundled: bundled[tag] });
+                    }
+                }
+            }
+
+            this.calibrationConfig = { ...this.calibrationConfig, ...merged };
+            console.log(`[CALIBRATION] Loaded config (bundled: ${bundledPath || 'none'}, user: ${fs.existsSync(userDataPath) ? userDataPath : 'none'}):`, this.calibrationConfig);
         } catch (err) {
             console.error('[CALIBRATION] Failed to load calibration config:', err);
             // If parsing failed, the file may be corrupted. Back it up and start fresh.
@@ -182,6 +318,13 @@ class T24Reader {
         const config = {};
         if (bestCombo.skipTonnesConversion) config.skipTonnesConversion = true;
         if (bestCombo.useFloatLE) config.useFloatLE = true;
+        // The unit is a magnitude-based GUESS: a tonnes cell first seen under
+        // >=1t of load, or a well-zeroed lbs cell, can be guessed wrong — a
+        // 2204.62x error that would otherwise persist forever. Mark the entry
+        // so (a) a curated bundled calibration can override it on a later
+        // launch and (b) the operator is told to sanity-check the reading.
+        config.unitAutoDetected = true;
+        config.detectedAt = new Date().toISOString();
 
         console.log(`[AUTO-DETECT] Tag ${tagHex}: detected ${bestCombo.label} (score: ${bestScore.toFixed(1)})`);
         console.log(`[AUTO-DETECT] Config for ${tagHex}:`, config);
@@ -191,6 +334,15 @@ class T24Reader {
 
         // Persist to calibration.json
         this.saveCalibration();
+
+        // Tell the operator: an unconfirmed unit guess on a load reading is a
+        // wrong-certificate risk, not a detail for the console log. Queued so
+        // it survives firing before the window/view exists.
+        this.queueUnitNotice({
+            tag: tagHex,
+            label: bestCombo.label,
+            unit: bestCombo.skipTonnesConversion ? 'raw (lbs)' : 'tonnes → lbs',
+        });
     }
 
     // Returns the float endianness ({useFloatLE}) shared by all already-known
@@ -213,11 +365,14 @@ class T24Reader {
 
     saveCalibration() {
         try {
-            // Always save to userData. loadCalibration() reads userData FIRST, so
-            // saving anywhere else (e.g. the dev config/ folder) means auto-detected
-            // calibrations would never be read back on the next launch.
+            // Always save to userData, but only the USER-origin entries —
+            // bundled entries stay in the shipped file so installer updates to
+            // them keep taking effect on this machine.
             const savePath = path.join(app.getPath('userData'), 'calibration.json');
-            fs.writeFileSync(savePath, JSON.stringify(this.calibrationConfig, null, 4));
+            const userOnly = Object.fromEntries(
+                Object.entries(this.calibrationConfig).filter(([, cfg]) => !(cfg && cfg.fromBundled))
+            );
+            writeFileAtomic(savePath, JSON.stringify(userOnly, null, 4));
             console.log(`[CALIBRATION] Saved config to ${savePath}`);
         } catch (err) {
             console.error('[CALIBRATION] Failed to save calibration config:', err);
@@ -236,11 +391,42 @@ class T24Reader {
             this.device.on('error', (err) => {
                 console.error('HID Device Error:', err);
                 this.close();
+                // node-hid permanently stops reading after an 'error' event, but
+                // if the dongle is still enumerated (sleep/resume, USB hiccup)
+                // the scan loop's status never changes, so nothing ever reopens
+                // the device: acquisition stalls forever while the UI says
+                // "Connected". Flip the status so the next 2s scan re-opens and
+                // resumes polling/logging, and tell the renderer meanwhile.
+                if (deviceStatus === 'connected') {
+                    deviceStatus = 'disconnected';
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('device-status-changed', deviceStatus);
+                    }
+                    if (companionServer.isRunning) {
+                        companionServer.updateSessionState({ deviceStatus });
+                    }
+                }
             });
 
             console.log('T24 Device opened.');
         } catch (err) {
             console.error('Failed to open T24 device:', err);
+            // scanForDongle flips deviceStatus to 'connected' BEFORE calling
+            // open(); if the open fails (device still re-enumerating after
+            // sleep/resume, EBUSY) nothing would ever retry — status shows
+            // Connected with no device forever. Flip back so the 2s scan
+            // keeps retrying until the open actually succeeds.
+            try {
+                if (deviceStatus === 'connected') {
+                    deviceStatus = 'disconnected';
+                    if (mainWindow && !mainWindow.isDestroyed()) {
+                        mainWindow.webContents.send('device-status-changed', deviceStatus);
+                    }
+                    if (companionServer.isRunning) {
+                        companionServer.updateSessionState({ deviceStatus });
+                    }
+                }
+            } catch (e) { /* module bindings not initialized yet */ }
         }
     }
 
@@ -403,15 +589,28 @@ class T24Reader {
         this.firstTimestamp = null;
         this.logInterval = intervalMs;
         this.lastLoggedTimestamps.clear();
-        if (preserve && fs.existsSync(this.logFilePath)) {
+        if (preserve) {
             // Resuming a recovered session: keep appending to the existing log,
-            // with Elapsed continuous from its first sample.
-            try {
-                const firstLine = fs.readFileSync(this.logFilePath, 'utf-8').split('\n').find(l => l.trim());
-                if (firstLine) this.firstTimestamp = JSON.parse(firstLine).timestamp || null;
-            } catch (e) { }
+            // with Elapsed continuous from its first sample. Skip unparseable
+            // lines (a truncated line is exactly why we may be resuming).
+            // NEVER archive in preserve mode — when the recovery came from the
+            // autosave fallback (no safety log on disk), archiving here would
+            // move the just-recovered data's only on-disk copy out of reach
+            // for the 60s until the first new autosave tick.
+            if (fs.existsSync(this.logFilePath)) {
+                try {
+                    for (const line of fs.readFileSync(this.logFilePath, 'utf-8').split('\n')) {
+                        if (!line.trim()) continue;
+                        try { this.firstTimestamp = JSON.parse(line).timestamp || null; break; } catch (e) { }
+                    }
+                } catch (e) { }
+            }
         } else {
             archiveSafetyLogFile(this.logFilePath);
+            // A leftover rolling autosave belongs to a previous session that
+            // never saved cleanly. Archive it before this session's 60s ticks
+            // overwrite the only copy.
+            archiveAutosaveFile();
         }
         this.updatePowerSaveBlocker();
 
@@ -476,6 +675,10 @@ class T24Reader {
         this.watchdogTimer = setInterval(() => {
             if (!this.isLogging || !this.device) return;
             const now = Date.now();
+            // Skip the round right after an event-loop stall (big synchronous
+            // save): tags look silent only because the process froze — don't
+            // inject synthetic heartbeats for a dropout that never happened.
+            if (now - (this.lastTickAt || 0) > 2500) return;
 
             for (const [tag, lastTime] of (this.lastPacketTimes || new Map())) {
                 const silentMs = now - lastTime;
@@ -508,16 +711,27 @@ class T24Reader {
                     } catch (e) { }
 
                     // 2. Emit heartbeat with last-known value (LOG100 "Default Value" behavior)
-                    //    This keeps the recording continuous with no gaps
+                    //    This keeps the recording continuous with no gaps.
+                    //    Heartbeats are SYNTHETIC — they repeat the last real reading, so
+                    //    they must (a) carry the same tare/scale pipeline as real packets,
+                    //    (b) carry tareOffset so the ZEROED badge doesn't flicker off, and
+                    //    (c) be flagged so the renderer can distinguish them from measured
+                    //    data (recorded rows keep the flag for auditability, and staleness
+                    //    indicators ignore them so a radio dropout is visible live).
                     if (this.lastValues.has(tag) && mainWindow && !mainWindow.isDestroyed()) {
                         let value = this.lastValues.get(tag);
-                        if (this.tares.has(tag)) {
-                            value -= this.tares.get(tag);
+                        const tareOffset = this.tares.get(tag) || 0;
+                        value -= tareOffset;
+                        const cfg = this.calibrationConfig[tag] || {};
+                        if (cfg.scaleFactor === undefined) {
+                            value *= this.scaleFactors.get(tag) || 1.0;
                         }
                         const heartbeat = {
                             tag: tag,
                             value: value,
-                            timestamp: now
+                            tareOffset: tareOffset,
+                            timestamp: now,
+                            synthetic: true
                         };
                         mainWindow.webContents.send('live-data-packet', heartbeat);
                         // Forward heartbeat to companion
@@ -552,7 +766,13 @@ class T24Reader {
         if (this.lastValues.has(tag)) {
             this.tares.set(tag, this.lastValues.get(tag));
             console.log(`Tared tag ${tag} at value ${this.lastValues.get(tag).toFixed(2)}`);
+            return true;
         }
+        // No reading yet (e.g. Zero pressed right after app start, before the
+        // first packet) — the old code silently no-op'd and the whole test then
+        // recorded the rigging dead weight. Report failure so the UI can say so.
+        console.warn(`[T24] Zero ignored for tag ${tag}: no reading received yet`);
+        return false;
     }
 
     clearTare(tag) {
@@ -633,6 +853,22 @@ class T24Reader {
             if (!this.sampleBuffers.has(tagHex)) {
                 this.sampleBuffers.set(tagHex, []);
             }
+            // After a per-tag silence gap (radio dropout, transmitter sleep,
+            // dongle replug), discard the stale buffer: averaging up to 9
+            // pre-gap samples into the first fresh readings recorded a
+            // never-measured ramp and attenuated real load changes.
+            // Guard: when the 1s event-loop heartbeat is itself stale, the gap
+            // came from the main process stalling on a big synchronous write —
+            // the radio was fine, so keep the buffers.
+            const nowMs = Date.now();
+            if (!this.lastSampleTimes) this.lastSampleTimes = new Map();
+            const lastSampleAt = this.lastSampleTimes.get(tagHex) || 0;
+            const loopStalled = nowMs - (this.lastTickAt || 0) > 2500;
+            if (lastSampleAt && nowMs - lastSampleAt > 3000 && !loopStalled) {
+                this.sampleBuffers.set(tagHex, []);
+                console.log(`[T24] Tag ${tagHex}: cleared smoothing buffer after ${((nowMs - lastSampleAt) / 1000).toFixed(1)}s gap`);
+            }
+            this.lastSampleTimes.set(tagHex, nowMs);
             const buffer = this.sampleBuffers.get(tagHex);
             buffer.push(value);
             if (buffer.length > SMOOTHING_BUFFER_SIZE) buffer.shift();
@@ -697,12 +933,35 @@ class T24Reader {
                         ...packet,
                         "Elapsed (ms)": packet.timestamp - this.firstTimestamp
                     };
-                    fs.appendFileSync(this.logFilePath, JSON.stringify(logEntry) + '\n');
-                    this.lastLoggedTimestamps.set(tagHex, packet.timestamp);
+                    // The safety log is the crash-recovery net: an append failure
+                    // (disk full, AV lock, permissions) must NOT be swallowed with
+                    // the malformed-packet errors — surface it to the operator.
+                    try {
+                        fs.appendFileSync(this.logFilePath, JSON.stringify(logEntry) + '\n');
+                        this.lastLoggedTimestamps.set(tagHex, packet.timestamp);
+                        this.safetyLogHealthy = true;
+                    } catch (writeErr) {
+                        this.reportSafetyLogFailure(writeErr);
+                    }
                 }
             }
         } catch (err) {
             // Silently fail if buffer reading fails (wrong packet format)
+        }
+    }
+
+    // Tell the renderer the crash-recovery log is failing, at most once per 30s,
+    // so the operator sees a persistent warning instead of a silent dead net.
+    reportSafetyLogFailure(err) {
+        const now = Date.now();
+        if (this.safetyLogHealthy !== false || now - (this.lastSafetyLogErrorAt || 0) > 30000) {
+            this.safetyLogHealthy = false;
+            this.lastSafetyLogErrorAt = now;
+            this.lastSafetyLogError = { message: err.message, timestamp: now };
+            console.error('[SAFETY-LOG] Append failed:', err.message);
+            if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('safety-log-error', this.lastSafetyLogError);
+            }
         }
     }
 
@@ -749,7 +1008,7 @@ function loadLeaksFromDisk() {
 }
 function saveLeaksToDisk(leaks) {
     try {
-        fs.writeFileSync(LEAKS_FILE, JSON.stringify(leaks, null, 2), 'utf8');
+        writeFileAtomic(LEAKS_FILE, JSON.stringify(leaks, null, 2));
     } catch (e) {
         console.error('[LEAKS] Failed to save:', e.message);
     }
@@ -757,9 +1016,16 @@ function saveLeaksToDisk(leaks) {
 companionServer.setLeaks(loadLeaksFromDisk());
 companionServer.onLeaksChanged = (leaks) => { saveLeaksToDisk(leaks); };
 companionServer.onMarkerToggle = (phase) => {
+    // Return whether the marker can actually land: /api/marker used to return
+    // 200 unconditionally, so a tap after Stop (or with no window) was silently
+    // dropped while the phone showed success. A false here becomes an HTTP 409
+    // that triggers the PWA's failure alert.
+    if (!t24Reader.isLogging) return false;
     if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('companion-marker-toggle', phase);
+        return true;
     }
+    return false;
 };
 
 function scanForDongle() {
@@ -3066,11 +3332,36 @@ async function fetchEquipmentForJob(event, jobNum) {
 function saveData(event, data, filename) {
     const dataPath = getDataPath(filename);
     try {
-        fs.writeFileSync(dataPath, JSON.stringify(data));
+        // Atomic write + hourly rolling .bak: this file holds every job and
+        // certificate dataset, so a truncated write here is catastrophic.
+        writeFileAtomic(dataPath, JSON.stringify(data), { backupIntervalMs: 60 * 60 * 1000 });
         return { success: true };
     } catch (error) {
         console.error('Failed to save data:', error);
         return { success: false, error: error.message };
+    }
+}
+
+// Restore a data file from its rolling .bak. Re-materializes the main file
+// immediately so the restore survives even if the caller never saves again —
+// a one-shot in-memory restore would silently reset to nothing on next launch
+// (backupCorruptFile has already renamed the corrupt original away).
+function restoreFromBak(dataPath, label) {
+    try {
+        const bakPath = dataPath + '.bak';
+        if (!fs.existsSync(bakPath)) return null;
+        const raw = fs.readFileSync(bakPath, 'utf-8');
+        const bak = JSON.parse(raw);
+        try {
+            writeFileAtomic(dataPath, raw);
+        } catch (writeErr) {
+            console.error(`[${label}] Could not re-materialize restored file:`, writeErr.message);
+        }
+        console.warn(`[${label}] Restored ${path.basename(dataPath)} from rolling backup (${bakPath})`);
+        return bak;
+    } catch (bakErr) {
+        console.error(`[${label}] Rolling backup also unreadable:`, bakErr);
+        return null;
     }
 }
 
@@ -3081,10 +3372,17 @@ function loadData(event, filename) {
             const data = fs.readFileSync(dataPath, 'utf-8');
             return JSON.parse(data);
         }
-        return null;
+        // Main file missing but a rolling backup exists: a corrupt original was
+        // renamed away on a previous launch (or the file was deleted). Restore
+        // rather than silently starting with zero jobs.
+        return restoreFromBak(dataPath, 'DATA');
     } catch (error) {
         console.error('Failed to load data:', error);
-        if (error instanceof SyntaxError) backupCorruptFile(dataPath, 'DATA');
+        if (error instanceof SyntaxError) {
+            backupCorruptFile(dataPath, 'DATA');
+            const bak = restoreFromBak(dataPath, 'DATA');
+            if (bak) return bak;
+        }
         return null;
     }
 }
@@ -3165,12 +3463,30 @@ app.whenReady().then(() => {
     });
 
     ipcMain.handle('t24:tare', (event, tag) => {
-        t24Reader.tare(tag);
-        return { success: true };
+        const ok = t24Reader.tare(tag);
+        return ok
+            ? { success: true }
+            : { success: false, error: 'No reading received from this cell yet — Zero was not applied' };
     });
 
     ipcMain.handle('t24:clearTare', (event, tag) => {
         t24Reader.clearTare(tag);
+        return { success: true };
+    });
+
+    // Operator notices that may have fired before any view was listening
+    // (auto-detect at launch, safety-log failures in another mode). Views pull
+    // these on mount so warnings are never silently lost.
+    ipcMain.handle('t24:getPendingNotices', () => ({
+        unitNotices: t24Reader.unitNotices,
+        safetyLogError: t24Reader.safetyLogHealthy === false ? t24Reader.lastSafetyLogError : null,
+    }));
+
+    // Dismissing a notice must stick — otherwise every view remount re-shows
+    // it and trains the operator to reflex-dismiss real warnings.
+    ipcMain.handle('t24:dismissNotices', (event, opts) => {
+        if (!opts || opts.units) t24Reader.unitNotices = [];
+        if (!opts || opts.safetyLog) t24Reader.lastSafetyLogError = null;
         return { success: true };
     });
 
@@ -3258,32 +3574,67 @@ app.whenReady().then(() => {
 
 
     // Persistence & Recovery
+    const readAutosaveRows = () => {
+        try {
+            const file = getAutosavePath();
+            if (!fs.existsSync(file)) return null;
+            const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+            if (saved && Array.isArray(saved.data) && saved.data.length > 0) return saved.data;
+        } catch (e) { }
+        return null;
+    };
+
     ipcMain.handle('t24:checkRecovery', () => {
         const logPath = path.join(app.getPath('userData'), 'safety-log.jsonl');
-        if (fs.existsSync(logPath)) {
-            try {
-                const stats = fs.statSync(logPath);
-                return stats.size > 10; // More than just a few bytes
-            } catch (e) { return false; }
-        }
-        return false;
+        try {
+            if (fs.existsSync(logPath) && fs.statSync(logPath).size > 10) return true;
+        } catch (e) { }
+        // No safety log, but a leftover rolling autosave means a recording was
+        // interrupted without a clean save — offer it for recovery too.
+        return readAutosaveRows() !== null;
     });
 
     ipcMain.handle('t24:loadRecovery', () => {
         const logPath = path.join(app.getPath('userData'), 'safety-log.jsonl');
+        let entries = [];
         if (fs.existsSync(logPath)) {
             try {
-                const content = fs.readFileSync(logPath, 'utf-8');
-                const lines = content.split('\n').filter(l => l.trim());
-                return lines.map(l => JSON.parse(l));
-            } catch (e) { return []; }
+                // Tolerant per-line parse: a truncated final line (power loss
+                // mid-append) must not throw away every good sample before it.
+                entries = parseJsonlLines(fs.readFileSync(logPath, 'utf-8'));
+            } catch (e) { entries = []; }
         }
-        return [];
+        // Safety-log rows carry the raw packet's lowercase `tag`; the renderer's
+        // entire pipeline (charts, certificates, CSV) keys on capital-T `Tag`.
+        // Normalize here so a recovered session behaves like a live one, and
+        // carry-forward a "Total Load" the way live logging does — without it,
+        // pivoted CSV exports of recovered data show a blank totals column.
+        const lastVals = new Map();
+        entries = entries.map(e => {
+            if (e && e.tag !== undefined && typeof e.value === 'number') lastVals.set(e.tag, e.value);
+            let row = e;
+            if (row.Tag === undefined && row.tag !== undefined) row = { ...row, Tag: row.tag };
+            if (row['Total Load'] === undefined) {
+                let total = 0;
+                lastVals.forEach(v => { total += v; });
+                row = { ...row, 'Total Load': total };
+            }
+            return row;
+        });
+        // The safety log can die mid-recording (disk full, AV lock) while the
+        // 60s autosave keeps flushing the full dataset — or vice versa. Return
+        // whichever recovery source holds MORE of the recording.
+        const autosaveRows = readAutosaveRows() || [];
+        return autosaveRows.length > entries.length ? autosaveRows : entries;
     });
 
-    ipcMain.handle('t24:clearRecovery', () => {
+    ipcMain.handle('t24:clearRecovery', (event, opts) => {
         const logPath = path.join(app.getPath('userData'), 'safety-log.jsonl');
         archiveSafetyLogFile(logPath);
+        // On an explicit recovery discard, also archive the rolling autosave —
+        // it may hold the only copy of the discarded recording. On the normal
+        // post-save clear the autosave is deleted separately (clearAutosave).
+        if (opts && opts.discard) archiveAutosaveFile();
         return true;
     });
 
@@ -3303,7 +3654,7 @@ app.whenReady().then(() => {
         try {
             const id = `${Date.now()}-${name.replace(/[^a-zA-Z0-9]/g, '_')}`;
             const sessionFile = path.join(sessionsDir, `${id}.json`);
-            fs.writeFileSync(sessionFile, JSON.stringify({ name, data, meta, savedAt: new Date().toISOString() }));
+            writeFileAtomic(sessionFile, JSON.stringify({ name, data, meta, savedAt: new Date().toISOString() }));
             console.log(`[SESSIONS] Saved session: ${name} (${data.length} samples)`);
             return { success: true, id };
         } catch (err) {
@@ -3343,7 +3694,9 @@ app.whenReady().then(() => {
     ipcMain.handle('sessions:autosave', (event, { name, data, meta }) => {
         try {
             const autosaveFile = path.join(sessionsDir, '_autosave.json');
-            fs.writeFileSync(autosaveFile, JSON.stringify({ name, data, meta, savedAt: new Date().toISOString() }));
+            // Atomic: a crash during the 60s tick must not destroy the previous
+            // good snapshot — this file exists precisely to survive crashes.
+            writeFileAtomic(autosaveFile, JSON.stringify({ name, data, meta, savedAt: new Date().toISOString() }));
             return { success: true };
         } catch (err) { return { success: false }; }
     });
@@ -3394,8 +3747,23 @@ app.whenReady().then(() => {
     ipcMain.handle('companion:updateState', (event, state) => {
         if (!state || typeof state !== 'object') return { success: false };
         if (companionServer.isRunning) {
+            // Overload membership BEFORE updateSessionState overwrites it —
+            // needed for the change detection below.
+            const prevOverload = [...(companionServer.currentState.overloadTags || [])].sort().join(',');
             // Always include current device status from main process
             companionServer.updateSessionState({ ...state, deviceStatus });
+            // Overload changes also go out as the dedicated 'overload' broadcast —
+            // that's the message the PWA's flashing banner + phone vibration are
+            // wired to. It never fired before (sendOverloadAlert had zero call
+            // sites), so crews watching phones saw green during WLL overloads.
+            // Only on MEMBERSHIP change: re-broadcasting per packet restarted the
+            // phones' vibration pattern continuously during an overload.
+            if (Array.isArray(state.overloadTags)) {
+                const nextOverload = [...state.overloadTags].sort().join(',');
+                if (prevOverload !== nextOverload) {
+                    companionServer.sendOverloadAlert(state.overloadTags, state.wllThreshold || 0);
+                }
+            }
         }
         return { success: true };
     });
@@ -3423,8 +3791,26 @@ app.whenReady().then(() => {
         return { success: removed };
     });
 
-    // When a phone sends a photo, notify the renderer
+    // When a phone sends a photo, persist it to disk and notify the renderer.
+    // Photos previously lived only in RAM + React state, so an app restart
+    // silently destroyed every field photo the crew had taken.
+    const companionPhotosDir = path.join(app.getPath('userData'), 'companion-photos');
     companionServer.onPhotoReceived = (photo) => {
+        try {
+            const m = /^data:image\/(\w+);base64,(.+)$/s.exec(photo.dataUrl || '');
+            if (m) {
+                if (!fs.existsSync(companionPhotosDir)) fs.mkdirSync(companionPhotosDir, { recursive: true });
+                const stamp = new Date(photo.timestamp || Date.now()).toISOString().replace(/[:.]/g, '-');
+                const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+                const file = path.join(companionPhotosDir, `photo-${stamp}.${ext}`);
+                fs.writeFile(file, Buffer.from(m[2], 'base64'), (err) => {
+                    if (err) console.error('[COMPANION] Photo save to disk failed:', err.message);
+                    else console.log(`[COMPANION] Photo saved to ${file}`);
+                });
+            }
+        } catch (e) {
+            console.error('[COMPANION] Photo persistence error:', e.message);
+        }
         if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send('companion-photo-received', photo);
         }
@@ -3465,13 +3851,24 @@ app.whenReady().then(() => {
             if (fs.existsSync(certRegistryPath)) {
                 return JSON.parse(fs.readFileSync(certRegistryPath, 'utf8'));
             }
-        } catch (e) { console.error('[CERT-REGISTRY] Load failed:', e); }
+            // Missing file: check the rolling backup before resetting to 0 —
+            // a reset reissues certificate numbers already printed on
+            // delivered certificates. restoreFromBak also re-materializes
+            // the file so the restore isn't one-shot.
+            const restored = restoreFromBak(certRegistryPath, 'CERT-REGISTRY');
+            if (restored) return restored;
+        } catch (e) {
+            console.error('[CERT-REGISTRY] Load failed:', e);
+            if (e instanceof SyntaxError) backupCorruptFile(certRegistryPath, 'CERT-REGISTRY');
+            const restored = restoreFromBak(certRegistryPath, 'CERT-REGISTRY');
+            if (restored) return restored;
+        }
         return { lastNumber: 0, certs: [] };
     };
 
     const saveCertRegistry = (registry) => {
         try {
-            fs.writeFileSync(certRegistryPath, JSON.stringify(registry, null, 2));
+            writeFileAtomic(certRegistryPath, JSON.stringify(registry, null, 2), { backupIntervalMs: 24 * 60 * 60 * 1000 });
         } catch (e) { console.error('[CERT-REGISTRY] Save failed:', e); }
     };
 

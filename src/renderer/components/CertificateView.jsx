@@ -803,7 +803,13 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         if (updatedTests[idx].measuredForce === null) {
                             updatedTests[idx].measuredForce = stats.maxWeight.toFixed(0);
                         }
-                        if (updatedTests[idx].hookData && !updatedTests[idx].hookData[0]?.measuredForce) {
+                        // stats.maxWeight is the COMBINED peak across all cells.
+                        // With one hook that's the hook's force; with multiple
+                        // hooks, writing the total into Hook 1 certified that a
+                        // single hook withstood the whole combined load — leave
+                        // per-hook cells for the operator instead.
+                        if ((current.hooks || []).length <= 1 &&
+                            updatedTests[idx].hookData && !updatedTests[idx].hookData[0]?.measuredForce) {
                             const newHookData = [...updatedTests[idx].hookData];
                             newHookData[0] = { ...newHookData[0], measuredForce: stats.maxWeight.toFixed(0) };
                             updatedTests[idx] = { ...updatedTests[idx], hookData: newHookData };
@@ -821,10 +827,11 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                     if (dataSets.length > parseInt(current.numTests)) {
                         current.numTests = dataSets.length;
                     }
-                    if (!current.equipmentWll) {
-                        const firstStats = processChartData(dataSets[0].data, serials);
-                        if (firstStats) current.equipmentWll = firstStats.maxWeight.toFixed(0) + ' lbs';
-                    }
+                    // NOTE: equipmentWll is deliberately NOT auto-filled from the
+                    // measured peak. A proof test runs at 100-125% of WLL, so the
+                    // peak is by definition not the rated WLL — auto-filling it
+                    // printed the overload test value as the equipment's rated
+                    // capacity. WLL must come from equipment metadata or the operator.
 
                     // Auto-fill spreader beam tests: distribute datasets across pick points
                     if (current.spreaderTests) {
@@ -2196,9 +2203,10 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                                                                 <td style={{ verticalAlign: 'middle', paddingTop: '3px', fontSize: '0.75rem' }}>{test.testDuration}</td>
                                                                 {(formData.hooks || []).map((hook, hIdx) => {
                                                                     const force = test.hookData && test.hookData[hIdx]?.measuredForce;
+                                                                    const num = parseFloat(String(force || '').replace(/,/g, ''));
                                                                     return (
                                                                         <td key={hIdx} className="force-val" style={{ fontSize: '0.8rem', verticalAlign: 'middle', paddingTop: '3px' }}>
-                                                                            {force && String(force).trim() ? `${force} lbs` : '--'}
+                                                                            {force && String(force).trim() ? `${isNaN(num) ? force : num.toLocaleString()} lbs` : '--'}
                                                                         </td>
                                                                     );
                                                                 })}
@@ -3179,10 +3187,10 @@ const CertificateView = ({ data, jobId, onUpdateMetadata, onPreviewModeChange, s
                         </div>
                     </div>
 
-                    {/* Per-hook measured forces — only shown when multiple hooks are being tested */}
-                    {(formData.hooks || []).length > 1 && (
+                    {/* Per-hook measured forces — these populate the hook and Total columns on the certificate */}
+                    {(formData.hooks || []).length > 0 && (
                     <div style={{ marginTop: '12px', background: 'var(--bg-elevated)', padding: '14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
-                        <div style={{ fontSize: '0.78rem', color: 'var(--accent)', fontWeight: 700, marginBottom: '10px' }}>MEASURED FORCE PER HOOK</div>
+                        <div style={{ fontSize: '0.78rem', color: 'var(--accent)', fontWeight: 700, marginBottom: '10px' }}>{(formData.hooks || []).length > 1 ? 'MEASURED FORCE PER HOOK' : 'MEASURED FORCE'}</div>
                         <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min((formData.hooks || []).length, 3)}, 1fr)`, gap: '10px' }}>
                             {(formData.hooks || []).map((hook, hIdx) => (
                                 <div key={hIdx} style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>

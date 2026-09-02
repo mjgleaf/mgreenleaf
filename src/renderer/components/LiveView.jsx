@@ -4,6 +4,12 @@ import LiveGraph from './LiveGraph';
 import { getElectronAPI } from '../utils/electronAPI';
 import { getTagLabel } from '../utils/tagNames';
 
+// Generation counter for recording sessions. MODULE scope, not a ref: LiveView
+// unmounts mid-stopTest (the auto-advance tab switch) and a component-local ref
+// would reset on remount, letting a stale stop continuation archive the NEXT
+// recording's safety log, delete its autosave, and wipe its sample buffer.
+let recordingGeneration = 0;
+
 const formatElapsed = (ms) => {
     const totalSec = Math.max(0, Math.round(ms / 1000));
     const m = Math.floor(totalSec / 60);
@@ -468,6 +474,8 @@ function LiveView({
     const autosaveRefA = useRef(null);
     const autosaveRefB = useRef(null);
 
+    // (Recording-session generation lives at module scope — see recordingGeneration.)
+
     useEffect(() => { wllThresholdRef.current = wllThreshold; }, [wllThreshold]);
 
     // Audio context for overload alarm
@@ -503,7 +511,10 @@ function LiveView({
         if (recoveryData && recoveryData.length > 0 && !recoveryAppliedRef.current) {
             setLoggedData(recoveryData);
             setIsLogging(true);
-            const recoveryTags = Array.from(new Set(recoveryData.map(d => d.Tag)));
+            // Safety-log rows historically carried only the raw packet's
+            // lowercase `tag`; accept both so a recovered session restores its
+            // cell assignments instead of filling slots with undefined.
+            const recoveryTags = Array.from(new Set(recoveryData.map(d => d.Tag || d.tag))).filter(Boolean);
             if (recoveryTags.length > 0) {
                 const nextTags = [...selectedTags];
                 recoveryTags.slice(0, 10).forEach((tag, i) => { nextTags[i] = tag; });
@@ -514,11 +525,16 @@ function LiveView({
             // Restart the on-disk safety nets for the restored session: keep
             // appending to the existing safety log (preserve — don't wipe the
             // data being recovered) and resume the 60s autosave.
+            recordingGeneration += 1;
             if (getElectronAPI().startSafetyLog) {
                 getElectronAPI().startSafetyLog(logInterval, true);
             }
             if (autosaveRefA.current) clearInterval(autosaveRefA.current);
             autosaveRefA.current = setInterval(() => performAutosave({ label: null, setLoggedData }), 60000);
+            // Flush an autosave immediately: when the recovery came from the
+            // autosave fallback there may be NO other on-disk copy until the
+            // first 60s tick, and a second crash in that window would lose it.
+            performAutosave({ label: null, setLoggedData });
         }
     }, [recoveryData]);
 
@@ -527,10 +543,21 @@ function LiveView({
         if (!devices) return;
         const now = Date.now();
         Object.entries(devices).forEach(([tag, packet]) => {
-            setLastPacketTimes(prev => ({ ...prev, [tag]: packet.timestamp || now }));
+            // Watchdog heartbeats are synthetic repeats of the last real reading —
+            // don't let them refresh the signal indicator, or a radio dropout
+            // stays invisible to the operator for as long as it lasts.
+            if (!packet.synthetic) {
+                setLastPacketTimes(prev => ({ ...prev, [tag]: packet.timestamp || now }));
+            }
 
             if (wllThresholdRef.current > 0 && Math.abs(packet.value) > wllThresholdRef.current) {
-                setOverloadTags(prev => { const next = new Set(prev); next.add(tag); return next; });
+                // Keep the Set identity stable while membership is unchanged —
+                // a fresh Set per packet re-fired the companion overload
+                // broadcast (and phone vibration) on every sample.
+                setOverloadTags(prev => {
+                    if (prev.has(tag)) return prev;
+                    const next = new Set(prev); next.add(tag); return next;
+                });
                 playOverloadBeep();
             } else {
                 setOverloadTags(prev => {
@@ -546,6 +573,16 @@ function LiveView({
         const interval = setInterval(() => setLastPacketTimes(prev => ({ ...prev })), 1000);
         return () => clearInterval(interval);
     }, []);
+
+    // Forward overload state to the companion phones. The PWA's flashing
+    // overload banner + vibration listen for this and previously could never
+    // fire — the desktop alarmed while every phone stayed green.
+    useEffect(() => {
+        const api = getElectronAPI();
+        if (api.companionUpdateState) {
+            api.companionUpdateState({ overloadTags: [...overloadTags], wllThreshold });
+        }
+    }, [overloadTags, wllThreshold, companionRunning]);
 
     const tags = Object.keys(devices);
 
@@ -569,6 +606,7 @@ function LiveView({
         ctx.setIsLogging(true);
         // The single shared safety log spans the whole recording window: start it
         // when the first test begins, stop it when the last test ends.
+        recordingGeneration += 1;
         if (!ctx.otherIsLogging && getElectronAPI().startSafetyLog) {
             getElectronAPI().startSafetyLog(logInterval);
         }
@@ -580,13 +618,19 @@ function LiveView({
     // job-number prompt is opened instead.
     const stopTest = async (ctx) => {
         const api = getElectronAPI();
+        // The recording session this stop belongs to. If a new test starts
+        // while the awaits below are in flight (or after a remount), the token
+        // moves on and this stop must no longer touch the safety log, the
+        // recovery nets, or the (new session's) sample buffers.
+        const myGen = recordingGeneration;
+        const ownsSafetyNets = () => recordingGeneration === myGen;
         ctx.setIsLogging(false);
         if (ctx.autosaveRef.current) { clearInterval(ctx.autosaveRef.current); ctx.autosaveRef.current = null; }
 
         const data = ctx.loggedData;
         const testMarkers = ctx.markers;
         if (!data || data.length === 0) {
-            if (!ctx.otherIsLogging && api.stopSafetyLog) api.stopSafetyLog();
+            if (!ctx.otherIsLogging && api.stopSafetyLog && ownsSafetyNets()) api.stopSafetyLog();
             return 'No data was recorded. Nothing to save.';
         }
 
@@ -604,13 +648,14 @@ function LiveView({
             backedUp = !!result?.success;
         }
 
-        if (!ctx.otherIsLogging && api.stopSafetyLog) api.stopSafetyLog();
+        if (!ctx.otherIsLogging && api.stopSafetyLog && ownsSafetyNets()) api.stopSafetyLog();
 
         // Only retire the crash-recovery log and rolling autosave once this
-        // recording has a durable copy of its own and no other test is still
-        // relying on them. (clearRecovery archives the log, never deletes it.)
+        // recording has a durable copy of its own, no other test is still
+        // relying on them, AND no newer recording has taken them over.
+        // (clearRecovery archives the log, never deletes it.)
         const clearNets = () => {
-            if (!backedUp || ctx.otherIsLogging) return;
+            if (!backedUp || ctx.otherIsLogging || !ownsSafetyNets()) return;
             if (api.clearRecovery) api.clearRecovery();
             if (api.clearAutosave) api.clearAutosave();
         };
@@ -628,8 +673,14 @@ function LiveView({
             const csvName = ctx.label ? `${selectedJob.QuoteNum}-${ctx.label.replace(/\s+/g, '')}` : selectedJob.QuoteNum;
             await api.saveCSV(data, csvName);
             clearNets();
-            ctx.setLoggedData([]);
-            ctx.setMarkers([]);
+            // Only wipe the panel's buffers if no NEWER recording has started on
+            // them — the CSV dialog above can sit open for minutes while the
+            // operator starts the next test, and wiping then would silently
+            // delete the in-flight recording's samples.
+            if (ownsSafetyNets()) {
+                ctx.setLoggedData([]);
+                ctx.setMarkers([]);
+            }
             return backedUp ? null : 'Saved to job, but the backup session file could not be written — keep this window open until you verify the data in Reports.';
         }
 
@@ -640,7 +691,13 @@ function LiveView({
             label: ctx.label,
             backedUp,
             clearNets,
-            clear: () => { ctx.setLoggedData([]); ctx.setMarkers([]); }
+            // Same ownership guard: if a newer recording claimed this panel
+            // while the prompt sat open, don't wipe its buffers.
+            clear: () => {
+                if (!ownsSafetyNets()) return;
+                ctx.setLoggedData([]);
+                ctx.setMarkers([]);
+            }
         });
         setShowJobPrompt(true);
         return null;
@@ -691,9 +748,14 @@ function LiveView({
         await getElectronAPI().toggleKeepAwake(newState);
     };
 
-    const handleZero = (tag) => {
+    const handleZero = async (tag) => {
         if (!tag) return;
-        getElectronAPI().tare(tag);
+        const result = await getElectronAPI().tare(tag);
+        // A silent no-op here once recorded a whole test with the rigging dead
+        // weight included — if the cell hasn't reported yet, say so.
+        if (result && result.success === false) {
+            alert(`Zero NOT applied for cell ${tag}:\n${result.error || 'No reading received yet.'}\n\nWait for the cell to show a live value, then press Zero again.`);
+        }
     };
 
     const handleWakeSensors = async () => {

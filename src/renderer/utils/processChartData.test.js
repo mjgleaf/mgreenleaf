@@ -155,4 +155,69 @@ describe('processChartData', () => {
 
         expect(result.peakTime).toBeTruthy();
     });
+
+    it('does NOT scavenge peakTime from comma-formatted weight strings', () => {
+        // "28,450.75" used to yield peakTime "50:75" — a nonsense certified time.
+        const data = [
+            { 'Elapsed Seconds': 0, 'Pounds': '10,100.25' },
+            { 'Elapsed Seconds': 10, 'Pounds': '28,450.75' },
+        ];
+        const result = processChartData(data);
+
+        expect(result).not.toBeNull();
+        expect(result.peakTime).not.toMatch(/^\d{1,2}:[6-9]\d$/); // no minutes >= 60
+        expect(result.peakTime).not.toBe('50:75');
+    });
+
+    it('preserves the true per-tag peak within a 500ms pivot bucket (multi-tag)', () => {
+        // Two tags → pivot path. Tag A peaks at 10250 lbs mid-bucket, then a
+        // later lower sample lands in the SAME bucket (both round to 10000ms).
+        // Last-sample-wins used to discard the peak, understating the
+        // certificate's measured force.
+        const data = [
+            { Tag: 'AAAA', value: 10000, 'Elapsed (ms)': 9800 },
+            { Tag: 'BBBB', value: 5000, 'Elapsed (ms)': 9810 },
+            { Tag: 'AAAA', value: 10250, 'Elapsed (ms)': 10100 }, // true peak
+            { Tag: 'AAAA', value: 9900, 'Elapsed (ms)': 10200 },  // same bucket, lower
+            { Tag: 'BBBB', value: 5000, 'Elapsed (ms)': 10150 },
+        ];
+        const result = processChartData(data);
+
+        expect(result).not.toBeNull();
+        // Peak of the total must include tag A's 10250, not the later 9900.
+        expect(result.maxWeight).toBe(15250);
+    });
+
+    it('multi-tag maxWeight is the peak INSTANTANEOUS total, not a sum of non-simultaneous peaks', () => {
+        // A peaks early in the bucket, B peaks late. Sum-of-bucket-peaks would
+        // claim 5200+5100=10300 lbs; the true applied maximum was 9900.
+        const data = [
+            { Tag: 'AAAA', value: 5200, 'Elapsed (ms)': 120 },
+            { Tag: 'BBBB', value: 4700, 'Elapsed (ms)': 130 },
+            { Tag: 'AAAA', value: 4800, 'Elapsed (ms)': 400 },
+            { Tag: 'BBBB', value: 5100, 'Elapsed (ms)': 430 },
+        ];
+        const result = processChartData(data);
+
+        expect(result).not.toBeNull();
+        expect(result.maxWeight).toBe(9900);
+    });
+
+    it('multi-tag pivot still carries the LATEST value forward between buckets', () => {
+        const data = [
+            { Tag: 'AAAA', value: 100, 'Elapsed (ms)': 0 },
+            { Tag: 'BBBB', value: 50, 'Elapsed (ms)': 10 },
+            { Tag: 'AAAA', value: 300, 'Elapsed (ms)': 100 },  // peak in bucket 0
+            { Tag: 'AAAA', value: 200, 'Elapsed (ms)': 200 },  // last in bucket 0
+            { Tag: 'BBBB', value: 60, 'Elapsed (ms)': 1000 },  // bucket 1000: A carried forward
+        ];
+        const result = processChartData(data);
+
+        expect(result).not.toBeNull();
+        const cellA = result.chartData.datasets.find(d => d.label === 'Cell AAAA');
+        expect(cellA).toBeTruthy();
+        // Bucket 0 keeps A's peak (300); bucket 1000 carries A's LAST value (200).
+        expect(cellA.data[0]).toBe(300);
+        expect(cellA.data[cellA.data.length - 1]).toBe(200);
+    });
 });
